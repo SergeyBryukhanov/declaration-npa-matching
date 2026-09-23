@@ -1,0 +1,39 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Веса моделей - тяжёлые, скачиваются prepare.py, в репозиторий не кладём
+models/*.gguf
+models/multilingual-e5-small/
+
+# Кеш промежуточных вычислений (при появлении в будущих версиях)
+cache/*
+!cache/.gitkeep
+
+# Результат запуска - артефакт, не исходный код
+out/
+
+
+# Виртуальное окружение Python
+venv/
+.venv/
+env/
+ENV/
+
+# Секреты и локальные настройки
+.env
+.env.*
+!.env.example
+*.local
+secrets.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Дистрибутивы / сборка
+build/
+dist/
+*.egg-info/
