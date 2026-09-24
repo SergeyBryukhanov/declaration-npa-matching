@@ -169,6 +169,7 @@ class QwenLlamaCppReranker(LLMReranker):
         temperature: float = 0.0,
         max_new_tokens: int = 900,
         candidate_text_max_chars: int = 380,
+        verbose: bool = False,
     ):
         import llama_cpp  # локальный импорт: тяжёлая зависимость нужна
         from llama_cpp import Llama  # только в реальном режиме, не в --dry-run.
@@ -214,7 +215,7 @@ class QwenLlamaCppReranker(LLMReranker):
             model_path=model_path,
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
-            verbose=True,  # намеренно True: именно verbose-вывод llama.cpp
+            verbose=verbose,  # намеренно True: именно verbose-вывод llama.cpp
             # показывает построчно, сколько слоёв ушло на GPU/CPU при загрузке -
             # самый надёжный способ проверить офлоад на практике, а не по API.
         )

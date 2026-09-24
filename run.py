@@ -45,8 +45,8 @@ if not (_SUPPORTED_PY[0] <= sys.version_info[:2] < _SUPPORTED_PY[1]):
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import numpy as np
 
+import numpy as np
 from src import config
 from src.embeddings import DummyHashEmbeddingBackend, EmbeddingBackend, SentenceTransformerBackend
 from src.io_utils import PredictionsWriter, load_declarations, load_regulations
@@ -93,6 +93,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Заглушки вместо реальных моделей (для быстрой проверки пайплайна, не для оценки)",
     )
+    ap.add_argument("--verbose-llm", action="store_true",
+                    help="Подробный нативный лог llama.cpp (для отладки)")
     ap.add_argument("--no-embeddings", action="store_true", help="Отключить dense-сигнал, только BM25")
     ap.add_argument("--log-level", default="INFO")
     return ap
@@ -121,6 +123,7 @@ def build_llm_reranker(args) -> LLMReranker:
         n_threads=config.llm_cfg.n_threads,
         temperature=config.llm_cfg.temperature,
         max_new_tokens=config.llm_cfg.max_new_tokens,
+        verbose=args.verbose_llm,
         candidate_text_max_chars=config.llm_cfg.candidate_text_max_chars,
     )
 
