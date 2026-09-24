@@ -24,17 +24,57 @@ import random
 import sys
 import time
 
+# --- Проверка версии Python (Проблемы №1 и №9 из истории отладки) ---------
+# numpy/torch/llama-cpp-python публикуют готовые wheel только под Python
+# 3.10-3.12. На более новых/старых версиях pip уходит в сборку из исходников,
+# требующую компилятор C/C++, которого обычно нет - ошибка выглядит как
+# "Preparing metadata (pyproject.toml) ... error" на numpy и ничего не
+# говорит про настоящую причину (версию Python). Проверяем явно и сразу,
+# до любых тяжёлых импортов, чтобы дать понятную инструкцию вместо стектрейса.
+_SUPPORTED_PY = ((3, 10), (3, 13))  # [min, max) - поддерживаются 3.10, 3.11, 3.12
+if not (_SUPPORTED_PY[0] <= sys.version_info[:2] < _SUPPORTED_PY[1]):
+    sys.stderr.write(
+        f"\nОШИБКА: обнаружен Python {sys.version_info.major}.{sys.version_info.minor}, "
+        f"а numpy/torch/llama-cpp-python из requirements.txt публикуют готовые сборки "
+        f"только под Python 3.10-3.12.\n"
+        f"Похоже, активировано не то виртуальное окружение (проверьте, что вы в venv, "
+        f"а не в системном Python: 'python --version' должен показать 3.10.x-3.12.x).\n"
+        f"См. README.md, раздел 'Установка'.\n\n"
+    )
+    sys.exit(1)
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
 
 from src import config
 from src.embeddings import DummyHashEmbeddingBackend, EmbeddingBackend, SentenceTransformerBackend
-from src.io_utils import load_declarations, load_regulations, write_predictions_csv
+from src.io_utils import PredictionsWriter, load_declarations, load_regulations
 from src.llm_rerank import LLMReranker, QwenLlamaCppReranker, StubReranker
 from src.pipeline import Pipeline
 from src.tnved import TnvedIndex
 from src.validate import validate_predictions_file
+
+
+def check_models_present(args) -> None:
+    """
+    Проблема №6/№7: раньше отсутствие скачанных моделей проявлялось как
+    ValueError с сырым traceback из sentence_transformers, глубоко внутри
+    стека вызовов. Проверяем явно и заранее, с понятной инструкцией.
+    """
+    missing = []
+    if not args.no_embeddings and not os.path.isdir(args.embedding_model_dir):
+        missing.append(f"  - эмбеддинг-модель не найдена: {args.embedding_model_dir}")
+    if not os.path.isfile(args.llm_model_path):
+        missing.append(f"  - LLM не найдена: {args.llm_model_path}")
+    if missing:
+        sys.stderr.write(
+            "\nОШИБКА: не найдены файлы моделей:\n" + "\n".join(missing) +
+            "\n\nСкорее всего, вы ещё не запускали (или не полностью запустили) "
+            "разовую подготовку окружения:\n    python prepare.py\n"
+            "См. README.md, раздел 'Установка'.\n\n"
+        )
+        sys.exit(1)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -107,6 +147,8 @@ def main():
             "эмбеддинг-модели. Результат НЕ пригоден для оценки качества, только "
             "для проверки формата и работоспособности пайплайна."
         )
+    else:
+        check_models_present(args)
 
     logger.info("Загрузка данных...")
     declarations = load_declarations(args.declarations)
@@ -148,10 +190,13 @@ def main():
     )
 
     logger.info("Запуск пайплайна на %d декларациях...", len(declarations))
-    predictions = pipeline.run()
 
     out_csv = os.path.join(args.out, "predictions.csv")
-    write_predictions_csv(out_csv, predictions)
+    # Инкрементальная запись (Проблема №10): каждая декларация дописывается
+    # в CSV и сразу сбрасывается на диск, как только посчитана - если прогон
+    # прервётся на середине, уже обработанные декларации не потеряются.
+    with PredictionsWriter(out_csv) as writer:
+        pipeline.run(on_result=writer.write_declaration)
     logger.info("Записано: %s", out_csv)
 
     logger.info("Валидация формата вывода...")

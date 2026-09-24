@@ -34,8 +34,12 @@ DEFAULT_EMBEDDING_MODEL_DIR = os.path.join(DEFAULT_MODELS_DIR, "multilingual-e5-
 # Идентификаторы моделей "на бумаге" (используются только в prepare.py для
 # скачивания и в README для фиксации версий; во время run.py не используются,
 # т.к. вся загрузка идёт из DEFAULT_*_PATH).
-LLM_HF_REPO = "Qwen/Qwen2.5-7B-Instruct-GGUF"
-LLM_HF_FILENAME = "qwen2.5-7b-instruct-q4_k_m.gguf"
+# Репозиторий bartowski - известный, проверенный community-мирror официальных
+# весов Qwen2.5-7B-Instruct в GGUF (тот же официальный конвертер llama.cpp).
+# Официальный репозиторий Qwen/Qwen2.5-7B-Instruct-GGUF даёт на некоторых
+# ревизиях 404 на ожидаемое имя файла - выбран более предсказуемый источник.
+LLM_HF_REPO = "bartowski/Qwen2.5-7B-Instruct-GGUF"
+LLM_HF_FILENAME = "Qwen2.5-7B-Instruct-Q4_K_M.gguf"
 EMBEDDING_HF_REPO = "intfloat/multilingual-e5-small"
 
 

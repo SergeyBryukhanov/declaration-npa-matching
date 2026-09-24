@@ -24,10 +24,20 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
+
+# Увеличиваем таймаут ожидания данных от CDN huggingface (по умолчанию у
+# huggingface_hub он всего 10 секунд простоя, чего не хватает при скачивании
+# GGUF на ~4.7 ГБ на нестабильном соединении - см. Проблему №8, ReadTimeoutError
+# на середине скачивания). Переменную окружения нужно выставить ДО импорта
+# huggingface_hub, иначе она не подхватится.
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src import config
+
+_MAX_DOWNLOAD_ATTEMPTS = 5
 
 
 def download_llm(dest_path: str, repo_id: str, filename: str) -> None:
@@ -36,9 +46,34 @@ def download_llm(dest_path: str, repo_id: str, filename: str) -> None:
         return
     from huggingface_hub import hf_hub_download
 
-    print(f"Скачиваю {repo_id}/{filename} ...")
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    downloaded = hf_hub_download(repo_id=repo_id, filename=filename)
+
+    # Проблема №8: скачивание ~4.7 ГБ иногда обрывается по таймауту на
+    # нестабильном соединении (ReadTimeoutError на CDN). hf_hub_download сам
+    # умеет докачивать с места обрыва (частично скачанный файл лежит в его
+    # кеше как .incomplete), поэтому повторные попытки почти всегда быстро
+    # доезжают до конца, а не начинают с нуля.
+    last_error: Exception | None = None
+    for attempt in range(1, _MAX_DOWNLOAD_ATTEMPTS + 1):
+        try:
+            print(f"Скачиваю {repo_id}/{filename} (попытка {attempt}/{_MAX_DOWNLOAD_ATTEMPTS})...")
+            downloaded = hf_hub_download(repo_id=repo_id, filename=filename)
+            break
+        except Exception as e:  # requests.exceptions.ReadTimeout и т.п.
+            last_error = e
+            wait = min(5 * attempt, 30)
+            print(f"  Сбой скачивания ({e.__class__.__name__}: {e}). Повтор через {wait}с...")
+            time.sleep(wait)
+    else:
+        raise RuntimeError(
+            f"Не удалось скачать {repo_id}/{filename} за {_MAX_DOWNLOAD_ATTEMPTS} попыток. "
+            f"Последняя ошибка: {last_error}\n"
+            f"Попробуйте увеличить таймаут ещё сильнее (переменная окружения "
+            f"HF_HUB_DOWNLOAD_TIMEOUT) или скачать файл вручную через браузер "
+            f"по ссылке https://huggingface.co/{repo_id}/resolve/main/{filename} "
+            f"и положить его в {dest_path}."
+        ) from last_error
+
     # hf_hub_download кладёт файл в свой кеш; копируем/симлинкуем в наш
     # предсказуемый путь, чтобы run.py не зависел от кеша huggingface.
     if os.path.abspath(downloaded) != os.path.abspath(dest_path):

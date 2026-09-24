@@ -77,6 +77,10 @@ def write_predictions_csv(
     """
     predictions: declaration_id -> [(regulation_id, score), ...] длиной ровно 10,
                  уже отсортированный по убыванию score (rank 1 = первый элемент).
+
+    Пишет файл целиком за один раз. Для длинного прогона предпочтительнее
+    PredictionsWriter ниже - он дописывает строки по мере готовности, чтобы
+    прерванный запуск не терял уже посчитанный результат.
     """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as f:
@@ -85,3 +89,47 @@ def write_predictions_csv(
         for decl_id, ranked in predictions.items():
             for rank, (reg_id, score) in enumerate(ranked, start=1):
                 writer.writerow([decl_id, rank, reg_id, f"{score:.6f}"])
+
+
+class PredictionsWriter:
+    """
+    Инкрементальная запись predictions.csv - строки декларации дописываются
+    и сбрасываются на диск (flush) сразу после того, как она посчитана,
+    а не в самом конце всего прогона.
+
+    Зачем: при 151 декларации и LLM-реранке на CPU полный прогон может
+    занимать десятки минут; без инкрементальной записи прерывание (Ctrl+C,
+    сбой питания, случайное закрытие терминала) на середине уничтожало бы
+    весь уже посчитанный результат. С этим классом на диске в любой момент
+    лежит корректный CSV по уже обработанным декларациям (не по всем 151 -
+    это не финальный валидный файл, пока не обработаны все, но и не пусто).
+
+    Использование:
+        with PredictionsWriter(path) as w:
+            for decl in declarations:
+                ranked = ...
+                w.write_declaration(decl.declaration_id, ranked)
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        self._file = open(path, "w", encoding="utf-8", newline="")
+        self._writer = csv.writer(self._file)
+        self._writer.writerow(["declaration_id", "rank", "regulation_id", "score"])
+        self._file.flush()
+
+    def write_declaration(self, declaration_id: str, ranked: List[Tuple[str, float]]) -> None:
+        for rank, (reg_id, score) in enumerate(ranked, start=1):
+            self._writer.writerow([declaration_id, rank, reg_id, f"{score:.6f}"])
+        self._file.flush()
+        os.fsync(self._file.fileno())
+
+    def close(self) -> None:
+        self._file.close()
+
+    def __enter__(self) -> "PredictionsWriter":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()

@@ -26,12 +26,15 @@ LLM-реранк кандидатов-НПА локальной моделью (
 from __future__ import annotations
 
 import json
+import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from .text_normalize import truncate
+
+logger = logging.getLogger("llm_rerank")
 
 
 @dataclass(frozen=True)
@@ -167,14 +170,53 @@ class QwenLlamaCppReranker(LLMReranker):
         max_new_tokens: int = 900,
         candidate_text_max_chars: int = 380,
     ):
-        from llama_cpp import Llama  # локальный импорт: тяжёлая зависимость нужна
-        # только в реальном режиме, не в --dry-run.
+        import llama_cpp  # локальный импорт: тяжёлая зависимость нужна
+        from llama_cpp import Llama  # только в реальном режиме, не в --dry-run.
+
+        # --- Диагностика GPU (Проблема №11) ------------------------------
+        # n_gpu_layers=-1 в конфиге ничего не гарантирует: если установленная
+        # сборка llama-cpp-python скомпилирована БЕЗ поддержки CUDA (обычный
+        # CPU-wheel), офлоад молча не произойдёт и всё уйдёт на CPU без
+        # единой ошибки. На Windows встречаются и обратные случаи: сборка
+        # заявлена как CUDA, но офлоад всё равно не срабатывает (см.
+        # https://github.com/abetlen/llama-cpp-python/issues/2079).
+        # Поэтому явно логируем факт поддержки GPU этой сборкой ДО загрузки
+        # модели, чтобы не гадать по одной лишь скорости, использует ли GPU.
+        gpu_build_supported = None
+        try:
+            gpu_build_supported = bool(llama_cpp.llama_supports_gpu_offload())
+        except Exception:
+            pass  # старые версии llama-cpp-python могут не иметь этой функции
+
+        if n_gpu_layers != 0:
+            if gpu_build_supported is True:
+                logger.info(
+                    "llama-cpp-python собран с поддержкой GPU-офлоада, "
+                    "запрошено n_gpu_layers=%s.", n_gpu_layers,
+                )
+            elif gpu_build_supported is False:
+                logger.warning(
+                    "Установленная сборка llama-cpp-python БЕЗ поддержки GPU-офлоада "
+                    "(обычный CPU-wheel) - n_gpu_layers=%s будет проигнорирован, "
+                    "вся генерация пойдёт на CPU. Чтобы задействовать GPU, "
+                    "переустановите пакет с CUDA-сборкой (см. README, раздел "
+                    "'Использование GPU').", n_gpu_layers,
+                )
+            else:
+                logger.info(
+                    "Не удалось определить наличие GPU-поддержки в этой версии "
+                    "llama-cpp-python (нет llama_supports_gpu_offload). "
+                    "Смотрите строки ниже при загрузке модели: там llama.cpp "
+                    "печатает, сколько слоёв реально ушло на GPU."
+                )
 
         kwargs = dict(
             model_path=model_path,
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
-            verbose=False,
+            verbose=True,  # намеренно True: именно verbose-вывод llama.cpp
+            # показывает построчно, сколько слоёв ушло на GPU/CPU при загрузке -
+            # самый надёжный способ проверить офлоад на практике, а не по API.
         )
         if n_threads:
             kwargs["n_threads"] = n_threads

@@ -5,17 +5,74 @@ RAG + LLM решение: для каждой из 151 декларации во
 
 ## Установка
 
+```powershell
+py -3.11 -m venv venv        # ВАЖНО: 3.10-3.12, не 3.13/3.14 - см. диагностику ниже
+venv\Scripts\activate
+.\install.ps1                 # ставит requirements.txt + llama-cpp-python
+                               # (CPU или CUDA - автоопределение по nvidia-smi)
+python prepare.py             # ОДНОРАЗОВО, требует сеть: скачивает Qwen2.5-7B-Instruct
+                               # (GGUF, ~4.7 ГБ) и intfloat/multilingual-e5-small (~0.5 ГБ)
+                               # в ./models/. Это разрешённый заданием разовый шаг вне
+                               # лимита запуска.
+```
+
+На Linux/macOS вместо `install.ps1`:
 ```bash
-pip install -r requirements.txt --break-system-packages   # если нужно
-python prepare.py     # ОДНОРАЗОВО, требует сеть: скачивает Qwen2.5-7B-Instruct
-                       # (GGUF, ~4.7 ГБ) и intfloat/multilingual-e5-small (~0.5 ГБ)
-                       # в ./models/. Это разрешённый заданием разовый шаг вне
-                       # лимита запуска.
+python3.11 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+pip install llama-cpp-python==0.3.35   # см. "Использование GPU" ниже для CUDA-сборки
+python prepare.py
 ```
 
 Если веса уже скачаны иначе - положите их в `models/qwen2.5-7b-instruct-q4_k_m.gguf`
 и `models/multilingual-e5-small/` (пути задаются в `src/config.py`) и
 `prepare.py` запускать не нужно.
+
+### Использование GPU (CUDA)
+
+`llama-cpp-python` использует GPU, только если сама его сборка скомпилирована
+с поддержкой CUDA - обычный `pip install llama-cpp-python` ставит CPU-сборку.
+`install.ps1` определяет версию CUDA через `nvidia-smi` и сам подбирает индекс
+готовых wheel'ов:
+
+```powershell
+pip install llama-cpp-python==0.3.35 --prefer-binary `
+    --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu130   # CUDA 13.0
+```
+
+(`cu124`, `cu125`, `cu132` и т.д. - под другие версии CUDA; список - в
+выводе `install.ps1` или в [README проекта llama-cpp-python](https://github.com/abetlen/llama-cpp-python#supported-backends)).
+
+При запуске `run.py` в логах явно печатается, поддерживает ли установленная
+сборка GPU-офлоад (`src/llm_rerank.py`, диагностика при инициализации), а
+`llama.cpp` при загрузке модели (verbose-вывод) построчно показывает, сколько
+слоёв реально ушло на GPU - не полагайтесь на одну лишь скорость.
+
+**Известная проблема Windows CUDA-сборок**: у upstream-проекта бывали периоды,
+когда официальные Windows CUDA wheels либо не собирались, либо ставились, но
+не задействовали GPU (см. [issue #2079](https://github.com/abetlen/llama-cpp-python/issues/2079),
+[issue #1543](https://github.com/abetlen/llama-cpp-python/issues/1543)). Если
+диагностика в логе показывает, что GPU не используется, несмотря на успешную
+установку CUDA-сборки - решение всё равно полностью рабочее на CPU (просто
+медленнее); альтернативой может быть community-сборка с встроенными CUDA DLL,
+например [ThongvanAlexis/llama-cpp-python](https://github.com/ThongvanAlexis/llama-cpp-python/releases).
+
+## Диагностика проблем установки
+
+Частые ошибки и их первопричины (собрано по опыту установки на Windows):
+
+| Симптом | Причина | Решение |
+|---|---|---|
+| `numpy`/`torch` не собираются, ошибка Meson/компилятора | Python 3.13+ или <3.10 - нет готовых wheel | `py -3.11 -m venv venv`, см. "Установка" |
+| `llama-cpp-python` не собирается (`CMake Error: CMAKE_C_COMPILER not set`) | Нет готового wheel под точную версию/платформу, pip уходит в сборку из исходников без компилятора | Ставить через `install.ps1` / `--extra-index-url .../whl/cpu` (или `/cuXXX`), НЕ из `requirements.txt` напрямую |
+| `pip install -r requirements.txt` падает целиком, хотя часть пакетов "уже скачаны" | Транзакция pip атомарна - один упавший пакет откатывает всё | `llama-cpp-python` вынесен из `requirements.txt` в отдельный шаг именно поэтому |
+| `ModuleNotFoundError` на `huggingface_hub`/`sentence_transformers` сразу после "успешной" установки | Предыдущая транзакция откатилась целиком (см. выше), но это не всегда очевидно из лога | `pip list`, чтобы проверить, что реально стоит |
+| `ValueError: Path .../multilingual-e5-small not found` | `prepare.py` не запускался или не закончился | `python prepare.py`; `run.py` теперь и сам проверяет это перед стартом и печатает понятную инструкцию вместо traceback |
+| `404` при скачивании GGUF | Неверные repo/filename для конкретного HF-репозитория (у разных мирроров разные соглашения об именах) | Использовать проверенный источник (см. `src/config.py`, `LLM_HF_REPO`) или передать свой через `--llm-repo`/`--llm-filename` |
+| `ReadTimeoutError` на середине скачивания GGUF | Короткий таймаут по умолчанию на нестабильном соединении | `prepare.py` теперь сам ставит таймаут 120с и до 5 повторов с задержкой; при необходимости увеличьте `HF_HUB_DOWNLOAD_TIMEOUT` вручную |
+| Долгий запуск без вывода в консоль | Раньше прогресс печатался раз в 25 деклараций | Теперь прогресс-бар (`tqdm`) на каждую декларацию, со временем на декларацию и статусом LLM/фолбэк |
+| Прогон прервали (Ctrl+C) - страшно потерять результат | Раньше `predictions.csv` писался одним файлом только в конце | Теперь пишется построчно и сбрасывается на диск (`fsync`) сразу после каждой декларации - прерванный прогон не теряет уже посчитанное (файл, впрочем, не будет валиден по формату, пока не досчитаны все 151) |
+| GPU не используется, хотя видеокарта есть | `n_gpu_layers=-1` ничего не даёт, если сама сборка `llama-cpp-python` собрана без CUDA | См. "Использование GPU" выше; `run.py` теперь логирует, поддерживает ли установленная сборка GPU-офлоад вообще |
 
 ## Запуск
 
@@ -28,6 +85,17 @@ python run.py --out ./out
 `--declarations`/`--regulations`/`--tnved`). Пишет `out/predictions.csv` и
 сразу сам проверяет формат (падает с понятной ошибкой, если что-то не так,
 а не молча отдаёт битый файл).
+
+Во время выполнения показывается прогресс-бар (`tqdm`) с временем на
+декларацию и статусом LLM/фолбэк; `predictions.csv` дописывается и
+сохраняется на диск (`fsync`) сразу после каждой декларации, а не одним
+файлом в конце - если прогон прервать (Ctrl+C, сбой), уже посчитанные
+декларации не теряются (сам файл, впрочем, не будет проходить валидацию
+формата, пока не досчитаны все декларации до конца).
+
+Перед стартом `run.py` сам проверяет, что модели скачаны (`prepare.py`
+выполнен) и что версия Python поддерживается (3.10-3.12) - при проблеме
+печатает понятную инструкцию вместо traceback.
 
 Быстрая самопроверка пайплайна **без реальных моделей** (секунды, не для оценки
 качества, только чтобы убедиться, что всё гладко склеено на конкретной машине):
@@ -55,7 +123,7 @@ pytest tests/                     # если pytest установлен
 
 | Компонент | Модель | Формат/бэкенд | Пакет |
 |---|---|---|---|
-| LLM-реранкер | `Qwen/Qwen2.5-7B-Instruct-GGUF`, файл `qwen2.5-7b-instruct-q4_k_m.gguf` | GGUF Q4_K_M, ~4.7 ГБ | `llama-cpp-python==0.2.85` |
+| LLM-реранкер | `bartowski/Qwen2.5-7B-Instruct-GGUF`, файл `Qwen2.5-7B-Instruct-Q4_K_M.gguf` (community-мирror официальных весов Qwen) | GGUF Q4_K_M, ~4.7 ГБ | `llama-cpp-python==0.3.35` |
 | Эмбеддинги | `intfloat/multilingual-e5-small` (118M) | sentence-transformers | `sentence-transformers==3.0.1`, `torch==2.3.1` |
 | Лексический поиск | BM25 (Okapi), собственная реализация | - | - |
 | Лемматизация | pymorphy2 (опционально) | - | `pymorphy2==0.9.1` |
@@ -287,6 +355,7 @@ out/predictions.csv
 ```
 run.py                  # точка входа: python run.py --out ./out
 prepare.py               # разовая подготовка (скачивание моделей), нужна сеть
+install.ps1               # Windows: установка зависимостей + llama-cpp-python (CPU/CUDA)
 requirements.txt
 README.md
 declarations.jsonl        # входные данные (предоставлены заданием)

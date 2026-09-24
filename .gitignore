@@ -13,27 +13,8 @@ cache/*
 # Результат запуска - артефакт, не исходный код
 out/
 
-
 # Виртуальное окружение Python
 venv/
 .venv/
 env/
 ENV/
-
-# Секреты и локальные настройки
-.env
-.env.*
-!.env.example
-*.local
-secrets.json
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Дистрибутивы / сборка
-build/
-dist/
-*.egg-info/

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from .config import FINAL_TOP_N, LLMConfig, RetrievalConfig
 from .embeddings import EmbeddingBackend
@@ -23,7 +23,19 @@ from .llm_rerank import Candidate, LLMReranker
 from .retrieval import HybridCorpusIndex
 from .tnved import TnvedIndex, build_enriched_query
 
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - tqdm всегда должен быть в requirements.txt,
+    # но пайплайн не должен падать целиком только из-за отсутствия прогресс-бара.
+    tqdm = None
+
 logger = logging.getLogger("pipeline")
+
+# Тип колбэка, вызываемого сразу после обработки каждой декларации - используется
+# run.py для инкрементальной записи predictions.csv (см. "Проблема №10" в истории
+# правок: раньше файл писался только в самом конце, и Ctrl+C на 11-й минуте
+# уничтожал весь прогресс).
+OnResultCallback = Callable[[str, List[Tuple[str, float]]], None]
 
 
 def fill_to_top_n(
@@ -141,7 +153,14 @@ class Pipeline:
 
         return fill_to_top_n(llm_ranked, retrieval_ranked, top_n=FINAL_TOP_N)
 
-    def run(self) -> Dict[str, List[Tuple[str, float]]]:
+    def run(self, on_result: Optional[OnResultCallback] = None) -> Dict[str, List[Tuple[str, float]]]:
+        """
+        on_result(declaration_id, ranked_10): вызывается сразу после того, как
+        для декларации собраны итоговые 10 строк - до перехода к следующей.
+        run.py использует это, чтобы дописывать predictions.csv построчно
+        (см. io_utils.PredictionsWriter), а не одним файлом в конце: так
+        прерванный на середине запуск не теряет уже посчитанный результат.
+        """
         start = time.monotonic()
         cutoff_seconds = (
             self.time_budget_seconds * self.llm_cutoff_fraction
@@ -152,20 +171,51 @@ class Pipeline:
         predictions: Dict[str, List[Tuple[str, float]]] = {}
         llm_skipped_count = 0
 
-        for i, decl in enumerate(self.declarations, 1):
-            elapsed = time.monotonic() - start
-            use_llm = cutoff_seconds is None or elapsed < cutoff_seconds
-            if not use_llm:
-                llm_skipped_count += 1
+        iterator = self.declarations
+        progress_bar = None
+        if tqdm is not None:
+            progress_bar = tqdm(
+                total=len(self.declarations),
+                desc="Ранжирование НПА",
+                unit="декл",
+                dynamic_ncols=True,
+            )
 
-            predictions[decl.declaration_id] = self._process_one(decl, use_llm=use_llm)
+        try:
+            for i, decl in enumerate(self.declarations, 1):
+                elapsed = time.monotonic() - start
+                use_llm = cutoff_seconds is None or elapsed < cutoff_seconds
+                if not use_llm:
+                    llm_skipped_count += 1
 
-            if i % 25 == 0 or i == len(self.declarations):
-                logger.info(
-                    "Обработано %d/%d деклараций (%.1fs)%s",
-                    i, len(self.declarations), elapsed,
-                    " [бюджет времени исчерпан, остаток без LLM]" if not use_llm else "",
-                )
+                t_item_start = time.monotonic()
+                ranked = self._process_one(decl, use_llm=use_llm)
+                item_seconds = time.monotonic() - t_item_start
+
+                predictions[decl.declaration_id] = ranked
+                if on_result is not None:
+                    on_result(decl.declaration_id, ranked)
+
+                if progress_bar is not None:
+                    progress_bar.set_postfix(
+                        {
+                            "сек/декл": f"{item_seconds:.1f}",
+                            "LLM": "нет" if not use_llm else "да",
+                        }
+                    )
+                    progress_bar.update(1)
+                elif i % 10 == 0 or i == len(self.declarations):
+                    # Фолбэк без tqdm: печатаем реже, но не раз в 25 (проблема
+                    # №10 - на медленном железе первая строка могла не
+                    # появляться очень долго).
+                    logger.info(
+                        "Обработано %d/%d деклараций (%.1fs, последняя заняла %.1fs)%s",
+                        i, len(self.declarations), elapsed, item_seconds,
+                        " [бюджет времени исчерпан, остаток без LLM]" if not use_llm else "",
+                    )
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
 
         if llm_skipped_count:
             logger.warning(
