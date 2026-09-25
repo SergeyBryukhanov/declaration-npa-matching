@@ -51,7 +51,7 @@ class RetrievalConfig:
     tnved_exact_min_len: int = 20
 
     # Сколько кандидатов-НПА выходит из гибридного ретривера на LLM-реранк.
-    npa_candidate_k: int = 25
+    npa_candidate_k: int = 20
 
     # Параметры BM25 (Okapi, стандартные значения).
     bm25_k1: float = 1.5
