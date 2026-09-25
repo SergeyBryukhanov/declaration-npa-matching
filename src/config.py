@@ -73,7 +73,7 @@ class LLMConfig:
     n_gpu_layers: int = -1     # -1 = выгрузить все возможные слои на GPU, если она есть
     n_threads: int = max(1, (os.cpu_count() or 4) - 1)
     temperature: float = 0.0   # детерминированность важнее "креативности"
-    max_new_tokens: int = 900  # JSON-список из ~25 объектов с полями id/score
+    max_new_tokens: int = 500  # JSON-список из ~25 объектов с полями id/score
     candidate_text_max_chars: int = 380  # обрезка текста НПА в промпте
 
 
