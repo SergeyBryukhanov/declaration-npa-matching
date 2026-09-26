@@ -68,11 +68,11 @@ SYSTEM_PROMPT = """Ты - эксперт по таможенному регул�
 (и категориального совпадения достаточно).
 
 Отвечай СТРОГО в формате JSON-массива, без пояснений до или после, без
-markdown-разметки:
+markdown-разметки. В массиве - ТОЛЬКО ТОП-10 самых релевантных кандидатов
+(не все предложенные), отсортированные по убыванию score:
 [{"id": "<regulation_id>", "score": <число от 0 до 1>}, ...]
 
-В массиве должны быть ВСЕ id из списка кандидатов, отсортированные по
-убыванию score. Не придумывай id, которых нет в списке кандидатов."""
+Не придумывай id, которых нет в списке кандидатов ниже."""
 
 
 def build_user_prompt(
@@ -94,8 +94,9 @@ def build_user_prompt(
         snippet = truncate(c.text, candidate_text_max_chars)
         lines.append(f'{i}. id="{c.regulation_id}" (decree {c.decree_number}): {snippet}')
     lines.append(
-        f"\nВерни JSON-массив ровно из {len(candidates)} объектов "
-        f"(все id из списка выше), отсортированный по убыванию score."
+        f"\nВыше {len(candidates)} кандидатов. Верни JSON-массив ровно из 10 "
+        f"объектов - только ТОП-10 самых релевантных id из списка выше, "
+        f"отсортированных по убыванию score."
     )
     return "\n".join(lines)
 
@@ -215,9 +216,16 @@ class QwenLlamaCppReranker(LLMReranker):
             model_path=model_path,
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
-            verbose=verbose,  # намеренно True: именно verbose-вывод llama.cpp
-            # показывает построчно, сколько слоёв ушло на GPU/CPU при загрузке -
-            # самый надёжный способ проверить офлоад на практике, а не по API.
+            # По умолчанию False: verbose=True в llama-cpp-python включает НЕ
+            # только лог при загрузке модели, но и подробный нативный вывод
+            # llama.cpp на КАЖДЫЙ вызов генерации (CUDA graph reused,
+            # llama_perf_context_print и т.п.) - на 151 декларации это тонет
+            # прогресс-бар в тысячах строк. Диагностика поддержки GPU выше
+            # (llama_supports_gpu_offload) не зависит от этого флага и
+            # печатается всегда, поэтому отключение verbose её не отменяет.
+            # Для отладки конкретной модели/промпта можно временно включить
+            # через run.py --verbose-llm.
+            verbose=verbose,
         )
         if n_threads:
             kwargs["n_threads"] = n_threads

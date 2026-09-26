@@ -73,8 +73,13 @@ class LLMConfig:
     n_gpu_layers: int = -1     # -1 = выгрузить все возможные слои на GPU, если она есть
     n_threads: int = max(1, (os.cpu_count() or 4) - 1)
     temperature: float = 0.0   # детерминированность важнее "креативности"
-    max_new_tokens: int = 500  # JSON-список из ~25 объектов с полями id/score
+    max_new_tokens: int = 300  # теперь модель возвращает только топ-10 (не все
+    # кандидаты) - см. SYSTEM_PROMPT в llm_rerank.py; 10 объектов JSON ~180-220
+    # токенов, оставлен запас. Раньше требовался вывод на все 20-25 кандидатов
+    # (~500-700 токенов) - это и было основным драйвером времени на декларацию,
+    # не размер промпта (см. README, "Бюджет памяти и времени").
     candidate_text_max_chars: int = 380  # обрезка текста НПА в промпте
+    verbose: bool = False  # см. src/llm_rerank.py::QwenLlamaCppReranker
 
 
 @dataclass

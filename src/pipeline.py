@@ -38,6 +38,28 @@ logger = logging.getLogger("pipeline")
 OnResultCallback = Callable[[str, List[Tuple[str, float]]], None]
 
 
+class StepTiming:
+    """Разбивка времени одной декларации по этапам конвейера.
+
+    Добавлено по конкретному запросу после отладки на Colab: прогресс-бар
+    показывал только суммарное сек/декл, а понять, что именно съедает время
+    (retrieval почти всегда копеечный, LLM - основной потребитель) можно
+    было только по косвенным признакам. Теперь это видно явно, по каждой
+    декларации и агрегированно."""
+
+    __slots__ = ("anchor_s", "retrieval_s", "llm_s", "used_llm")
+
+    def __init__(self):
+        self.anchor_s = 0.0
+        self.retrieval_s = 0.0
+        self.llm_s = 0.0
+        self.used_llm = False
+
+    @property
+    def total_s(self) -> float:
+        return self.anchor_s + self.retrieval_s + self.llm_s
+
+
 def fill_to_top_n(
     llm_ranked: List[Tuple[str, float]],
     retrieval_ranked: List[Tuple[str, float]],
@@ -125,14 +147,22 @@ class Pipeline:
             rrf_k=retrieval_cfg.rrf_k,
         )
 
-    def _process_one(self, decl: Declaration, use_llm: bool) -> List[Tuple[str, float]]:
+    def _process_one(
+        self, decl: Declaration, use_llm: bool
+    ) -> Tuple[List[Tuple[str, float]], StepTiming]:
+        timing = StepTiming()
+
+        t0 = time.monotonic()
         tnved_matches = self.tnved_index.anchor(decl.text, top_k=self.cfg.tnved_top_k)
         enriched_query = build_enriched_query(decl.text, tnved_matches, max_matches=2)
+        timing.anchor_s = time.monotonic() - t0
 
+        t0 = time.monotonic()
         retrieval_ranked = self.npa_index.search(enriched_query, top_k=self.cfg.npa_candidate_k)
+        timing.retrieval_s = time.monotonic() - t0
 
         if not use_llm:
-            return fill_to_top_n([], retrieval_ranked, top_n=FINAL_TOP_N)
+            return fill_to_top_n([], retrieval_ranked, top_n=FINAL_TOP_N), timing
 
         candidates = [
             Candidate(
@@ -145,21 +175,32 @@ class Pipeline:
         ]
         tnved_context = " ".join(m.text for m in tnved_matches[:2])
 
+        t0 = time.monotonic()
         try:
             llm_ranked = self.llm_reranker.rerank(decl.text, tnved_context, candidates)
         except Exception:
             logger.exception("LLM-реранк упал для declaration_id=%s, фолбэк на retrieval", decl.declaration_id)
             llm_ranked = []
+        timing.llm_s = time.monotonic() - t0
+        timing.used_llm = True
 
-        return fill_to_top_n(llm_ranked, retrieval_ranked, top_n=FINAL_TOP_N)
+        return fill_to_top_n(llm_ranked, retrieval_ranked, top_n=FINAL_TOP_N), timing
 
-    def run(self, on_result: Optional[OnResultCallback] = None) -> Dict[str, List[Tuple[str, float]]]:
+    def run(
+        self, on_result: Optional[OnResultCallback] = None
+    ) -> Tuple[Dict[str, List[Tuple[str, float]]], List[Tuple[str, StepTiming]]]:
         """
         on_result(declaration_id, ranked_10): вызывается сразу после того, как
         для декларации собраны итоговые 10 строк - до перехода к следующей.
         run.py использует это, чтобы дописывать predictions.csv построчно
         (см. io_utils.PredictionsWriter), а не одним файлом в конце: так
         прерванный на середине запуск не теряет уже посчитанный результат.
+
+        Возвращает (predictions, timings) - timings это [(declaration_id,
+        StepTiming), ...] в порядке обработки, по одному на декларацию.
+        run.py использует это, чтобы сохранить timing_debug.csv и напечатать
+        сводку по этапам (anchor/retrieval/LLM) - см. README, "Диагностика
+        производительности".
         """
         start = time.monotonic()
         cutoff_seconds = (
@@ -169,9 +210,9 @@ class Pipeline:
         )
 
         predictions: Dict[str, List[Tuple[str, float]]] = {}
+        timings: List[Tuple[str, StepTiming]] = []
         llm_skipped_count = 0
 
-        iterator = self.declarations
         progress_bar = None
         if tqdm is not None:
             progress_bar = tqdm(
@@ -188,19 +229,22 @@ class Pipeline:
                 if not use_llm:
                     llm_skipped_count += 1
 
-                t_item_start = time.monotonic()
-                ranked = self._process_one(decl, use_llm=use_llm)
-                item_seconds = time.monotonic() - t_item_start
+                ranked, timing = self._process_one(decl, use_llm=use_llm)
+                timings.append((decl.declaration_id, timing))
 
                 predictions[decl.declaration_id] = ranked
                 if on_result is not None:
                     on_result(decl.declaration_id, ranked)
 
                 if progress_bar is not None:
+                    # retrieval и LLM показаны РАЗДЕЛЬНО - раньше был только
+                    # общий "сек/декл", по которому нельзя было понять, что
+                    # именно доминирует (retrieval почти всегда <0.1с, LLM -
+                    # десятки секунд, но без разбивки это было не видно).
                     progress_bar.set_postfix(
                         {
-                            "сек/декл": f"{item_seconds:.1f}",
-                            "LLM": "нет" if not use_llm else "да",
+                            "retrieval": f"{timing.retrieval_s:.2f}s",
+                            "LLM": f"{timing.llm_s:.1f}s" if timing.used_llm else "—",
                         }
                     )
                     progress_bar.update(1)
@@ -209,8 +253,8 @@ class Pipeline:
                     # №10 - на медленном железе первая строка могла не
                     # появляться очень долго).
                     logger.info(
-                        "Обработано %d/%d деклараций (%.1fs, последняя заняла %.1fs)%s",
-                        i, len(self.declarations), elapsed, item_seconds,
+                        "Обработано %d/%d деклараций (%.1fs, retrieval=%.2fs, LLM=%.1fs)%s",
+                        i, len(self.declarations), elapsed, timing.retrieval_s, timing.llm_s,
                         " [бюджет времени исчерпан, остаток без LLM]" if not use_llm else "",
                     )
         finally:
@@ -224,4 +268,34 @@ class Pipeline:
                 llm_skipped_count,
             )
 
-        return predictions
+        self._log_timing_summary(timings)
+        return predictions, timings
+
+    @staticmethod
+    def _log_timing_summary(timings: List[Tuple[str, StepTiming]]) -> None:
+        """Сводка по этапам - что реально bottleneck, не только суммарное время."""
+        import statistics
+
+        if not timings:
+            return
+
+        def stats_line(name: str, values: List[float]) -> str:
+            if not values:
+                return f"  {name}: нет данных"
+            return (
+                f"  {name}: медиана={statistics.median(values):.2f}s, "
+                f"среднее={statistics.mean(values):.2f}s, "
+                f"мин={min(values):.2f}s, макс={max(values):.2f}s, n={len(values)}"
+            )
+
+        anchor_vals = [t.anchor_s for _, t in timings]
+        retrieval_vals = [t.retrieval_s for _, t in timings]
+        llm_vals = [t.llm_s for _, t in timings if t.used_llm]
+
+        logger.info(
+            "Профиль времени по этапам (retrieval почти всегда дёшев - "
+            "основной потребитель времени виден явно, без гаданий):\n%s\n%s\n%s",
+            stats_line("ТН ВЭД якорение", anchor_vals),
+            stats_line("Retrieval (BM25+dense)", retrieval_vals),
+            stats_line("LLM-реранк (только там, где вызывался)", llm_vals),
+        )

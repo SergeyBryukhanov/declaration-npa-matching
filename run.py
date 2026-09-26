@@ -45,11 +45,11 @@ if not (_SUPPORTED_PY[0] <= sys.version_info[:2] < _SUPPORTED_PY[1]):
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-
 import numpy as np
+
 from src import config
 from src.embeddings import DummyHashEmbeddingBackend, EmbeddingBackend, SentenceTransformerBackend
-from src.io_utils import PredictionsWriter, load_declarations, load_regulations
+from src.io_utils import PredictionsWriter, load_declarations, load_regulations, write_timing_debug_csv
 from src.llm_rerank import LLMReranker, QwenLlamaCppReranker, StubReranker
 from src.pipeline import Pipeline
 from src.tnved import TnvedIndex
@@ -93,8 +93,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Заглушки вместо реальных моделей (для быстрой проверки пайплайна, не для оценки)",
     )
-    ap.add_argument("--verbose-llm", action="store_true",
-                    help="Подробный нативный лог llama.cpp (для отладки)")
+    ap.add_argument(
+        "--verbose-llm",
+        action="store_true",
+        help="Включить подробный нативный лог llama.cpp на каждую генерацию "
+             "(для отладки; по умолчанию выключено, т.к. забивает прогресс-бар)",
+    )
     ap.add_argument("--no-embeddings", action="store_true", help="Отключить dense-сигнал, только BM25")
     ap.add_argument("--log-level", default="INFO")
     return ap
@@ -123,8 +127,8 @@ def build_llm_reranker(args) -> LLMReranker:
         n_threads=config.llm_cfg.n_threads,
         temperature=config.llm_cfg.temperature,
         max_new_tokens=config.llm_cfg.max_new_tokens,
-        verbose=args.verbose_llm,
         candidate_text_max_chars=config.llm_cfg.candidate_text_max_chars,
+        verbose=args.verbose_llm,
     )
 
 
@@ -199,8 +203,12 @@ def main():
     # в CSV и сразу сбрасывается на диск, как только посчитана - если прогон
     # прервётся на середине, уже обработанные декларации не потеряются.
     with PredictionsWriter(out_csv) as writer:
-        pipeline.run(on_result=writer.write_declaration)
+        _predictions, timings = pipeline.run(on_result=writer.write_declaration)
     logger.info("Записано: %s", out_csv)
+
+    timing_csv = os.path.join(args.out, "timing_debug.csv")
+    write_timing_debug_csv(timing_csv, timings)
+    logger.info("Диагностика времени по этапам: %s", timing_csv)
 
     logger.info("Валидация формата вывода...")
     validate_predictions_file(

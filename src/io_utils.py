@@ -91,6 +91,26 @@ def write_predictions_csv(
                 writer.writerow([decl_id, rank, reg_id, f"{score:.6f}"])
 
 
+def write_timing_debug_csv(path: str, timings: List[Tuple[str, "StepTiming"]]) -> None:
+    """
+    Диагностический файл (НЕ часть обязательного формата задания) - по
+    строке на декларацию, с разбивкой времени по этапам. Открывается
+    pandas'ом в ноутбуке для построения реального распределения/гистограммы,
+    а не только сводки медиана/среднее из лога.
+
+        import pandas as pd
+        df = pd.read_csv('out/timing_debug.csv')
+        df['llm_s'].hist(bins=30)
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["declaration_id", "anchor_s", "retrieval_s", "llm_s", "total_s", "used_llm"])
+        for decl_id, t in timings:
+            writer.writerow([decl_id, f"{t.anchor_s:.4f}", f"{t.retrieval_s:.4f}",
+                              f"{t.llm_s:.4f}", f"{t.total_s:.4f}", int(t.used_llm)])
+
+
 class PredictionsWriter:
     """
     Инкрементальная запись predictions.csv - строки декларации дописываются

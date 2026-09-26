@@ -3,8 +3,6 @@
 RAG + LLM решение: для каждой из 151 декларации возвращает 10 наиболее
 релевантных НПА (из 562) в порядке убывания релевантности.
 
-Файл cuda_inf.ipynb - пример запуска, predictions.csv - получившийся результат
-
 ## Установка
 
 ```powershell
@@ -57,7 +55,17 @@ pip install llama-cpp-python==0.3.35 --prefer-binary `
 диагностика в логе показывает, что GPU не используется, несмотря на успешную
 установку CUDA-сборки - решение всё равно полностью рабочее на CPU (просто
 медленнее); альтернативой может быть community-сборка с встроенными CUDA DLL,
-например [ThongvanAlexis/llama-cpp-python](https://github.com/ThongvanAlexis/llama-cpp-python/releases).
+например [ThongvanAlexis/llama-cpp-python](https://github.com/ThongvanAlexis/llama-cpp-python/releases)
+(CUDA 12.6, Python 3.11, DLL вшиты в wheel - CUDA Toolkit ставить не нужно).
+
+**Видеокарты старше Turing (GTX 10xx и старее, архитектура Pascal/Maxwell,
+compute capability <7.5)**: начиная с CUDA Toolkit 13.0 NVIDIA убрала
+поддержку этих архитектур - `cu130`/`cu132`-wheel на такой карте не заработает
+никогда, независимо от драйвера (даже если `nvidia-smi` показывает
+`CUDA Version: 13.x` - это лишь максимум, который поддерживает драйвер, а не
+гарантия работы CUDA 13 тулчейна на конкретном GPU). Нужна сборка под CUDA
+12.x (`cu121`/`cu124`/`cu126`) - как официальная через `--extra-index-url`,
+так и упомянутая выше сборка ThongvanAlexis с вшитыми DLL.
 
 ## Диагностика проблем установки
 
