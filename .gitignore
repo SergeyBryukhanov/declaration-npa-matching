@@ -10,9 +10,6 @@ models/multilingual-e5-small/
 cache/*
 !cache/.gitkeep
 
-# Результат запуска - артефакт, не исходный код
-out/
-
 # Виртуальное окружение Python
 venv/
 .venv/
