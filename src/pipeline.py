@@ -213,6 +213,24 @@ class Pipeline:
         timings: List[Tuple[str, StepTiming]] = []
         llm_skipped_count = 0
 
+        # Скользящее окно последних LLM-таймингов - используется для
+        # АДАПТИВНОГО прогноза, влезет ли ещё один вызов в бюджет, вместо
+        # статичной доли. Статичная llm_cutoff_fraction не подстраивается под
+        # реальную скорость железа: на быстром GPU (~11с/декл) она напрасно
+        # отсекает последние декларации, хотя времени физически хватает
+        # (наблюдалось на Colab T4: полный прогон уложился в 27.5 мин при
+        # cutoff, рассчитанном на 24.8 мин); на медленном CPU, наоборот,
+        # фиксированная доля может не среагировать вовремя. Прогноз на основе
+        # реально намеренных последних вызовов решает оба случая сразу.
+        recent_llm_costs: List[float] = []
+        safety_margin = 1.3  # запас на волатильность (сеть/CPU throttling/GC)
+
+        def predicted_next_llm_cost() -> float:
+            if not recent_llm_costs:
+                return 0.0  # ещё нет данных - не блокируем самый первый вызов
+            window = recent_llm_costs[-10:]
+            return (sum(window) / len(window)) * safety_margin
+
         progress_bar = None
         if tqdm is not None:
             progress_bar = tqdm(
@@ -225,12 +243,17 @@ class Pipeline:
         try:
             for i, decl in enumerate(self.declarations, 1):
                 elapsed = time.monotonic() - start
-                use_llm = cutoff_seconds is None or elapsed < cutoff_seconds
+                if cutoff_seconds is None:
+                    use_llm = True
+                else:
+                    use_llm = elapsed + predicted_next_llm_cost() < cutoff_seconds
                 if not use_llm:
                     llm_skipped_count += 1
 
                 ranked, timing = self._process_one(decl, use_llm=use_llm)
                 timings.append((decl.declaration_id, timing))
+                if timing.used_llm:
+                    recent_llm_costs.append(timing.llm_s)
 
                 predictions[decl.declaration_id] = ranked
                 if on_result is not None:
