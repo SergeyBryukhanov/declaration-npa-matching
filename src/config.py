@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 # --------------------------------------------------------------------------
@@ -51,11 +52,13 @@ class RetrievalConfig:
     tnved_exact_min_len: int = 20
 
     # Сколько кандидатов-НПА выходит из гибридного ретривера на LLM-реранк.
-    # Снижено с 25 - см. историю правок в README: при "score all candidates"
-    # (текущая формулировка промпта) объём генерации пропорционален этому
-    # числу, а это и есть основной драйвер времени на декларацию (не размер
-    # промпта - GPU быстро обрабатывает вход, но генерирует последовательно).
-    npa_candidate_k: int = 13
+    # Снижено 25 -> 13 -> 10: пропускная способность бесплатной T4 в Colab
+    # заметно колеблется от прогона к прогону (наблюдалось 10.9с/декл и
+    # 13.4с/декл на идентичном коде и железе - вероятно, разделяемый GPU),
+    # поэтому берём запас по стоимости каждого вызова, а не только полагаемся
+    # на адаптивный cutoff (см. RuntimeConfig ниже) - так в "медленный день"
+    # больше деклараций физически успевает получить LLM-оценку, а не фолбэк.
+    npa_candidate_k: int = 10
 
     # Параметры BM25 (Okapi, стандартные значения).
     bm25_k1: float = 1.5
@@ -77,12 +80,9 @@ class LLMConfig:
     n_gpu_layers: int = -1     # -1 = выгрузить все возможные слои на GPU, если она есть
     n_threads: int = max(1, (os.cpu_count() or 4) - 1)
     temperature: float = 0.0   # детерминированность важнее "креативности"
-    max_new_tokens: int = 350  # промпт снова просит оценить ВСЕ кандидаты
-    # (не топ-10 - см. историю правок: формулировка "выбери топ-10" ухудшала
-    # калибровку score, модель начинала завышать оценки заведомо нерелевантным
-    # НПА). Экономия времени теперь через npa_candidate_k=13 (меньше объектов
-    # для оценки), а не через смену формулировки задачи. 13 объектов JSON
-    # ~230-260 токенов, оставлен запас.
+    max_new_tokens: int = 280  # промпт просит оценить ВСЕ кандидаты (сейчас
+    # их 10 - см. RetrievalConfig.npa_candidate_k), ~180-200 токенов JSON +
+    # запас.
     candidate_text_max_chars: int = 380  # обрезка текста НПА в промпте
     verbose: bool = False  # см. src/llm_rerank.py::QwenLlamaCppReranker
 
@@ -95,6 +95,42 @@ class EmbeddingConfig:
     # корректного качества (это задокументированное требование модели).
     query_prefix: str = "query: "
     passage_prefix: str = "passage: "
+
+
+@dataclass
+class SkipLLMConfig:
+    """Пропуск LLM-реранка для "однозначных" случаев (см. src/skip_rule.py).
+
+    mode:
+      "off"    - LLM на всех (поведение по умолчанию; признаки уверенности всё
+                 равно пишутся в timing_debug.csv для калибровки);
+      "shadow" - LLM на всех, но дополнительно считается, какие декларации
+                 БЫ пропустились, и насколько LLM совпала с retrieval на них.
+                 Даёт полноценный predictions.csv И данные для калибровки
+                 порогов за один прогон;
+      "on"     - декларации, прошедшие правило, реально пропускают LLM.
+
+    Пороги для режима "on" намеренно БЕЗ значений по умолчанию: их нужно
+    подобрать по логу прогона (scripts/calibrate_skip.py), а не угадывать -
+    иначе пропуск может молча ухудшить ранжирование там, где LLM исправляла
+    retrieval (см. docstring skip_rule.py).
+    """
+
+    mode: str = "off"
+    min_dense_gap: Optional[float] = None
+    min_bm25_ratio: Optional[float] = None
+    require_tnved_exact: bool = False
+
+    def validate(self) -> None:
+        if self.mode not in ("off", "shadow", "on"):
+            raise ValueError(f"skip-llm mode должен быть off/shadow/on, получено: {self.mode!r}")
+        if self.mode == "on" and (self.min_dense_gap is None or self.min_bm25_ratio is None):
+            raise ValueError(
+                "Режим --skip-llm on требует явных порогов --skip-min-dense-gap и "
+                "--skip-min-bm25-ratio. Подберите их: сначала прогон с "
+                "--skip-llm shadow, затем python scripts/calibrate_skip.py "
+                "out/timing_debug.csv (см. README, раздел про пропуск LLM)."
+            )
 
 
 @dataclass
@@ -126,3 +162,4 @@ retrieval_cfg = RetrievalConfig()
 llm_cfg = LLMConfig()
 embedding_cfg = EmbeddingConfig()
 runtime_cfg = RuntimeConfig()
+skip_llm_cfg = SkipLLMConfig()

@@ -16,11 +16,12 @@ import logging
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
-from .config import FINAL_TOP_N, LLMConfig, RetrievalConfig
+from .config import FINAL_TOP_N, LLMConfig, RetrievalConfig, SkipLLMConfig
 from .embeddings import EmbeddingBackend
 from .io_utils import Declaration, Regulation
 from .llm_rerank import Candidate, LLMReranker
 from .retrieval import HybridCorpusIndex
+from .skip_rule import ConfidenceFeatures, compute_features, is_confident
 from .tnved import TnvedIndex, build_enriched_query
 
 try:
@@ -47,13 +48,26 @@ class StepTiming:
     было только по косвенным признакам. Теперь это видно явно, по каждой
     декларации и агрегированно."""
 
-    __slots__ = ("anchor_s", "retrieval_s", "llm_s", "used_llm")
+    __slots__ = (
+        "anchor_s", "retrieval_s", "llm_s", "used_llm",
+        # --- диагностика пропуска LLM (см. src/skip_rule.py) ---
+        "skip_reason",   # "" (LLM вызвана) | "confident" (пропуск по правилу) | "budget" (не хватило времени)
+        "features",      # ConfidenceFeatures - признаки уверенности retrieval
+        "would_skip",    # прошла ли декларация правило (None - пороги не заданы)
+        "top1_agree",    # совпал ли лидер retrieval с лидером LLM (None - LLM не вызывалась/не ответила)
+        "top3_overlap",  # сколько из топ-3 retrieval попали в топ-3 LLM (0..3; None - как выше)
+    )
 
     def __init__(self):
         self.anchor_s = 0.0
         self.retrieval_s = 0.0
         self.llm_s = 0.0
         self.used_llm = False
+        self.skip_reason = ""
+        self.features: Optional[ConfidenceFeatures] = None
+        self.would_skip: Optional[bool] = None
+        self.top1_agree: Optional[bool] = None
+        self.top3_overlap: Optional[int] = None
 
     @property
     def total_s(self) -> float:
@@ -125,6 +139,7 @@ class Pipeline:
         llm_cfg: LLMConfig,
         time_budget_seconds: float | None = None,
         llm_cutoff_fraction: float = 0.85,
+        skip_cfg: SkipLLMConfig | None = None,
     ):
         self.declarations = declarations
         self.regulations = regulations
@@ -136,6 +151,8 @@ class Pipeline:
         self.llm_cfg = llm_cfg
         self.time_budget_seconds = time_budget_seconds
         self.llm_cutoff_fraction = llm_cutoff_fraction
+        self.skip_cfg = skip_cfg or SkipLLMConfig()
+        self.skip_cfg.validate()
 
         logger.info("Building hybrid NPA index over %d regulations...", len(regulations))
         self.npa_index = HybridCorpusIndex(
@@ -148,20 +165,42 @@ class Pipeline:
         )
 
     def _process_one(
-        self, decl: Declaration, use_llm: bool
+        self, decl: Declaration, allow_llm: bool
     ) -> Tuple[List[Tuple[str, float]], StepTiming]:
+        """allow_llm - решение по БЮДЖЕТУ ВРЕМЕНИ (из run()). Отдельно от него
+        здесь принимается решение по УВЕРЕННОСТИ retrieval (skip_cfg): в режиме
+        "on" однозначная декларация пропускает LLM независимо от бюджета."""
         timing = StepTiming()
 
         t0 = time.monotonic()
         tnved_matches = self.tnved_index.anchor(decl.text, top_k=self.cfg.tnved_top_k)
+        tnved_exact = any(m.method == "exact_substring" for m in tnved_matches)
         enriched_query = build_enriched_query(decl.text, tnved_matches, max_matches=2)
         timing.anchor_s = time.monotonic() - t0
 
         t0 = time.monotonic()
-        retrieval_ranked = self.npa_index.search(enriched_query, top_k=self.cfg.npa_candidate_k)
+        result = self.npa_index.search_with_signals(enriched_query, top_k=self.cfg.npa_candidate_k)
+        retrieval_ranked = result.ranked
         timing.retrieval_s = time.monotonic() - t0
 
-        if not use_llm:
+        # Признаки уверенности считаются ВСЕГДА (даже в режиме off): они
+        # пишутся в timing_debug.csv и нужны scripts/calibrate_skip.py.
+        features = compute_features(result.signals, tnved_exact)
+        timing.features = features
+        if self.skip_cfg.min_dense_gap is not None and self.skip_cfg.min_bm25_ratio is not None:
+            timing.would_skip = is_confident(
+                features,
+                min_dense_gap=self.skip_cfg.min_dense_gap,
+                min_bm25_ratio=self.skip_cfg.min_bm25_ratio,
+                require_tnved_exact=self.skip_cfg.require_tnved_exact,
+            )
+
+        if self.skip_cfg.mode == "on" and timing.would_skip:
+            timing.skip_reason = "confident"
+            return fill_to_top_n([], retrieval_ranked, top_n=FINAL_TOP_N), timing
+
+        if not allow_llm:
+            timing.skip_reason = "budget"
             return fill_to_top_n([], retrieval_ranked, top_n=FINAL_TOP_N), timing
 
         candidates = [
@@ -183,6 +222,16 @@ class Pipeline:
             llm_ranked = []
         timing.llm_s = time.monotonic() - t0
         timing.used_llm = True
+
+        # Согласие retrieval и LLM считаем по СЫРОМУ ответу LLM, а не по
+        # итоговому списку: при пустом/битом ответе fill_to_top_n подставляет
+        # порядок retrieval, и "согласие" было бы тривиально стопроцентным -
+        # это исказило бы калибровку порога пропуска.
+        if len(llm_ranked) >= 3 and len(retrieval_ranked) >= 3:
+            timing.top1_agree = llm_ranked[0][0] == retrieval_ranked[0][0]
+            timing.top3_overlap = len(
+                {r[0] for r in retrieval_ranked[:3]} & {l[0] for l in llm_ranked[:3]}
+            )
 
         return fill_to_top_n(llm_ranked, retrieval_ranked, top_n=FINAL_TOP_N), timing
 
@@ -244,14 +293,14 @@ class Pipeline:
             for i, decl in enumerate(self.declarations, 1):
                 elapsed = time.monotonic() - start
                 if cutoff_seconds is None:
-                    use_llm = True
+                    allow_llm = True
                 else:
-                    use_llm = elapsed + predicted_next_llm_cost() < cutoff_seconds
-                if not use_llm:
-                    llm_skipped_count += 1
+                    allow_llm = elapsed + predicted_next_llm_cost() < cutoff_seconds
 
-                ranked, timing = self._process_one(decl, use_llm=use_llm)
+                ranked, timing = self._process_one(decl, allow_llm=allow_llm)
                 timings.append((decl.declaration_id, timing))
+                if timing.skip_reason == "budget":
+                    llm_skipped_count += 1
                 if timing.used_llm:
                     recent_llm_costs.append(timing.llm_s)
 
@@ -267,7 +316,7 @@ class Pipeline:
                     progress_bar.set_postfix(
                         {
                             "retrieval": f"{timing.retrieval_s:.2f}s",
-                            "LLM": f"{timing.llm_s:.1f}s" if timing.used_llm else "—",
+                            "LLM": f"{timing.llm_s:.1f}s" if timing.used_llm else (timing.skip_reason or "—"),
                         }
                     )
                     progress_bar.update(1)
@@ -278,7 +327,7 @@ class Pipeline:
                     logger.info(
                         "Обработано %d/%d деклараций (%.1fs, retrieval=%.2fs, LLM=%.1fs)%s",
                         i, len(self.declarations), elapsed, timing.retrieval_s, timing.llm_s,
-                        " [бюджет времени исчерпан, остаток без LLM]" if not use_llm else "",
+                        " [бюджет времени исчерпан, остаток без LLM]" if timing.skip_reason == "budget" else "",
                     )
         finally:
             if progress_bar is not None:
@@ -322,3 +371,33 @@ class Pipeline:
             stats_line("Retrieval (BM25+dense)", retrieval_vals),
             stats_line("LLM-реранк (только там, где вызывался)", llm_vals),
         )
+
+        n_llm = sum(1 for _, t in timings if t.used_llm)
+        n_confident = sum(1 for _, t in timings if t.skip_reason == "confident")
+        n_budget = sum(1 for _, t in timings if t.skip_reason == "budget")
+        logger.info(
+            "Итог по декларациям: с LLM=%d, пропущено как однозначные=%d, "
+            "без LLM из-за бюджета времени=%d (всего %d)",
+            n_llm, n_confident, n_budget, len(timings),
+        )
+
+        def agreement_line(name: str, ts: List[StepTiming]) -> Optional[str]:
+            ts = [t for t in ts if t.top1_agree is not None]
+            if not ts:
+                return None
+            top1 = 100.0 * sum(1 for t in ts if t.top1_agree) / len(ts)
+            top3 = statistics.mean(t.top3_overlap for t in ts)
+            return (f"  {name}: n={len(ts)}, лидер retrieval == лидер LLM в {top1:.1f}% случаев, "
+                    f"пересечение топ-3 = {top3:.2f}/3")
+
+        lines = [
+            agreement_line("Все декларации с ответом LLM", [t for _, t in timings]),
+            agreement_line("Из них 'прошли бы правило пропуска'",
+                           [t for _, t in timings if t.would_skip]),
+        ]
+        lines = [ln for ln in lines if ln]
+        if lines:
+            logger.info(
+                "Согласие retrieval и LLM (данные для подбора порогов пропуска, "
+                "см. scripts/calibrate_skip.py):\n%s", "\n".join(lines),
+            )

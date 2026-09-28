@@ -11,7 +11,8 @@ BM25-скор и косинусное сходство живут в несоп�
 """
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -33,6 +34,30 @@ def reciprocal_rank_fusion(
         for rank, doc_id in enumerate(ranking, start=1):
             fused[doc_id] = fused.get(doc_id, 0.0) + 1.0 / (k + rank)
     return fused
+
+
+@dataclass(frozen=True)
+class RetrievalSignals:
+    """Сырые (до слияния рангов) сигналы двух ретриверов для одного запроса.
+
+    Нужны, чтобы оценить, насколько retrieval "уверен" в лидере, - RRF-скор
+    для этого не годится: он зависит только от рангов и почти не меняется
+    между "явным" и "спорным" случаем (1/(k+1) против 1/(k+2)). Используется
+    в src/skip_rule.py для решения, можно ли пропустить дорогой LLM-реранк.
+    """
+
+    bm25_top1_id: str
+    bm25_top1: float
+    bm25_top2: float
+    dense_top1_id: Optional[str]  # None, если dense-сигнал отключён
+    dense_top1: Optional[float]
+    dense_top2: Optional[float]
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    ranked: List[Tuple[str, float]]  # [(doc_id, fused_score), ...] по убыванию
+    signals: RetrievalSignals
 
 
 class HybridCorpusIndex:
@@ -64,14 +89,26 @@ class HybridCorpusIndex:
 
     def search(self, query_text: str, top_k: int) -> List[Tuple[str, float]]:
         """Возвращает [(doc_id, fused_score), ...] длиной top_k, по убыванию."""
+        return self.search_with_signals(query_text, top_k).ranked
+
+    def search_with_signals(self, query_text: str, top_k: int) -> SearchResult:
+        """То же, что search(), плюс сырые BM25/dense-сигналы для оценки
+        уверенности retrieval (см. RetrievalSignals)."""
         n = len(self.doc_ids)
         k_bm25 = min(max(top_k * 4, 50), n)  # берём с запасом перед слиянием рангов
 
         query_tokens = tokenize(query_text)
         bm25_top = self.bm25.top_k(query_tokens, k=k_bm25)
         bm25_ranking = [self.doc_ids[i] for i, _ in bm25_top]
+        bm25_top1_id = bm25_ranking[0]
+        bm25_top1 = bm25_top[0][1]
+        bm25_top2 = bm25_top[1][1] if len(bm25_top) > 1 else 0.0
 
         rankings = [bm25_ranking]
+
+        dense_top1_id: Optional[str] = None
+        dense_top1: Optional[float] = None
+        dense_top2: Optional[float] = None
 
         if self.embedding_backend is not None and self.doc_vecs is not None and n > 0:
             q_vec = self.embedding_backend.encode_queries([query_text])
@@ -84,7 +121,20 @@ class HybridCorpusIndex:
                 order = part[np.argsort(-sims[part])]
             dense_ranking = [self.doc_ids[i] for i in order]
             rankings.append(dense_ranking)
+            dense_top1_id = dense_ranking[0]
+            dense_top1 = float(sims[order[0]])
+            dense_top2 = float(sims[order[1]]) if len(order) > 1 else None
 
         fused = reciprocal_rank_fusion(rankings, k=self.rrf_k)
         ranked_ids = sorted(fused.keys(), key=lambda i: -fused[i])[:top_k]
-        return [(doc_id, fused[doc_id]) for doc_id in ranked_ids]
+        ranked = [(doc_id, fused[doc_id]) for doc_id in ranked_ids]
+
+        signals = RetrievalSignals(
+            bm25_top1_id=bm25_top1_id,
+            bm25_top1=float(bm25_top1),
+            bm25_top2=float(bm25_top2),
+            dense_top1_id=dense_top1_id,
+            dense_top1=dense_top1,
+            dense_top2=dense_top2,
+        )
+        return SearchResult(ranked=ranked, signals=signals)

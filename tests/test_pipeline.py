@@ -248,6 +248,233 @@ def test_end_to_end_dry_run_produces_valid_output():
         )
 
 
+# --------------------------------------------------------------------------
+# Пропуск LLM для однозначных случаев (src/skip_rule.py + pipeline)
+# --------------------------------------------------------------------------
+
+def _features(**kw):
+    from src.skip_rule import ConfidenceFeatures
+
+    base = dict(signals_agree=True, dense_gap=0.10, bm25_ratio=3.0, tnved_exact=False)
+    base.update(kw)
+    return ConfidenceFeatures(**base)
+
+
+def test_is_confident_requires_all_conditions():
+    from src.skip_rule import is_confident
+
+    ok = dict(min_dense_gap=0.05, min_bm25_ratio=2.0)
+    assert is_confident(_features(), **ok)
+    assert not is_confident(_features(signals_agree=False), **ok)   # лидеры разошлись
+    assert not is_confident(_features(signals_agree=None), **ok)    # нет dense-сигнала
+    assert not is_confident(_features(dense_gap=0.01), **ok)        # мал отрыв
+    assert not is_confident(_features(dense_gap=None), **ok)
+    assert not is_confident(_features(bm25_ratio=1.1), **ok)        # BM25 не выделил лидера
+    assert not is_confident(_features(), require_tnved_exact=True, **ok)
+    assert is_confident(_features(tnved_exact=True), require_tnved_exact=True, **ok)
+
+
+def test_skip_config_validation():
+    from src.config import SkipLLMConfig
+
+    SkipLLMConfig(mode="off").validate()
+    SkipLLMConfig(mode="shadow").validate()
+    SkipLLMConfig(mode="on", min_dense_gap=0.05, min_bm25_ratio=2.0).validate()
+    for bad in (SkipLLMConfig(mode="on"),
+                SkipLLMConfig(mode="on", min_dense_gap=0.05),
+                SkipLLMConfig(mode="maybe")):
+        try:
+            bad.validate()
+            assert False, f"должно было упасть: {bad}"
+        except ValueError:
+            pass
+
+
+def test_search_with_signals_matches_search():
+    from src.embeddings import DummyHashEmbeddingBackend
+
+    regs = load_regulations(REGULATIONS_PATH)
+    idx = HybridCorpusIndex([r.regulation_id for r in regs], [r.text for r in regs],
+                            DummyHashEmbeddingBackend())
+    q = "подшипники шариковые радиальные диаметр 30 мм"
+    res = idx.search_with_signals(q, top_k=10)
+    assert res.ranked == idx.search(q, top_k=10)
+    sig = res.signals
+    assert sig.bm25_top1 >= sig.bm25_top2 >= 0
+    assert sig.dense_top1 >= sig.dense_top2
+    assert sig.dense_top1_id is not None
+
+
+_TNVED_INDEX_CACHE = {}
+
+
+def _tiny_pipeline(skip_cfg, reranker):
+    """12 регуляций с непересекающимся словарём; D1 - однозначная декларация
+    (дословно текст R3), D2 - неоднозначная (по одному токену от четырёх НПА)."""
+    from src.config import RetrievalConfig, LLMConfig
+    from src.embeddings import DummyHashEmbeddingBackend
+    from src.io_utils import Declaration, Regulation
+    from src.pipeline import Pipeline
+
+    if "idx" not in _TNVED_INDEX_CACHE:
+        _TNVED_INDEX_CACHE["idx"] = TnvedIndex.from_file(TNVED_PATH)
+    regs = [Regulation(f"R{i}", "1", f"слово{i}a слово{i}b слово{i}c") for i in range(1, 13)]
+    decls = [
+        Declaration("D1", "слово3a слово3b слово3c"),
+        Declaration("D2", "слово1a слово5b слово9c слово11a"),
+    ]
+    return Pipeline(
+        declarations=decls, regulations=regs,
+        tnved_index=_TNVED_INDEX_CACHE["idx"],
+        embedding_backend=DummyHashEmbeddingBackend(),
+        llm_reranker=reranker,
+        retrieval_cfg=RetrievalConfig(), llm_cfg=LLMConfig(),
+        skip_cfg=skip_cfg,
+    )
+
+
+class _CountingReverseReranker:
+    """Тестовый реранкер: считает вызовы и ПЕРЕВОРАЧИВАЕТ порядок кандидатов
+    (лидер LLM заведомо не совпадает с лидером retrieval)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def rerank(self, declaration_text, tnved_context, candidates):
+        self.calls.append(declaration_text)
+        rev = list(reversed(candidates))
+        return [(c.regulation_id, 1.0 - 0.05 * i) for i, c in enumerate(rev)]
+
+
+def _assert_valid_output(predictions):
+    for decl_id, ranked in predictions.items():
+        assert len(ranked) == 10, decl_id
+        assert len({rid for rid, _ in ranked}) == 10, decl_id
+        scores = [sc for _, sc in ranked]
+        assert scores == sorted(scores, reverse=True), decl_id
+
+
+def test_skip_on_skips_only_confident_declaration():
+    from src.config import SkipLLMConfig
+
+    rr = _CountingReverseReranker()
+    pipe = _tiny_pipeline(SkipLLMConfig(mode="on", min_dense_gap=0.05, min_bm25_ratio=2.0), rr)
+    preds, timings = pipe.run()
+    by_id = dict(timings)
+
+    assert by_id["D1"].skip_reason == "confident" and not by_id["D1"].used_llm
+    assert by_id["D2"].skip_reason == "" and by_id["D2"].used_llm
+    assert rr.calls == ["слово1a слово5b слово9c слово11a"]  # LLM вызвана ТОЛЬКО для D2
+    assert preds["D1"][0][0] == "R3"  # однозначный лидер сохранён
+    _assert_valid_output(preds)
+
+
+def test_skip_shadow_calls_llm_everywhere_and_records_agreement():
+    from src.config import SkipLLMConfig
+
+    rr = _CountingReverseReranker()
+    pipe = _tiny_pipeline(SkipLLMConfig(mode="shadow", min_dense_gap=0.05, min_bm25_ratio=2.0), rr)
+    preds, timings = pipe.run()
+    by_id = dict(timings)
+
+    assert len(rr.calls) == 2                       # shadow НИКОГДА не пропускает LLM
+    assert by_id["D1"].would_skip is True and by_id["D2"].would_skip is False
+    assert by_id["D1"].skip_reason == ""
+    assert by_id["D1"].top1_agree is False          # реранкер перевернул порядок
+    assert by_id["D1"].top3_overlap is not None
+    _assert_valid_output(preds)
+
+
+def test_skip_off_never_skips_and_has_no_would_skip():
+    from src.config import SkipLLMConfig
+
+    rr = _CountingReverseReranker()
+    pipe = _tiny_pipeline(SkipLLMConfig(mode="off"), rr)
+    _, timings = pipe.run()
+    assert len(rr.calls) == 2
+    assert all(t.would_skip is None for _, t in timings)   # пороги не заданы
+    assert all(t.features is not None for _, t in timings)  # но признаки пишутся всегда
+
+
+def test_confident_takes_precedence_over_budget_reason():
+    from src.config import SkipLLMConfig
+    from src.io_utils import Declaration
+
+    pipe = _tiny_pipeline(SkipLLMConfig(mode="on", min_dense_gap=0.05, min_bm25_ratio=2.0),
+                          _CountingReverseReranker())
+    d1, d2 = pipe.declarations
+    _, t1 = pipe._process_one(d1, allow_llm=False)
+    _, t2 = pipe._process_one(d2, allow_llm=False)
+    assert t1.skip_reason == "confident"   # не считается деградацией из-за бюджета
+    assert t2.skip_reason == "budget"
+
+
+def test_agreement_not_recorded_when_llm_gives_no_answer():
+    """Пустой ответ LLM -> в итог подставляется retrieval; 'согласие' при этом
+    было бы тривиально 100% и исказило бы калибровку - его не должно быть."""
+    from src.config import SkipLLMConfig
+
+    class _Silent:
+        def rerank(self, *a, **k):
+            return []
+
+    pipe = _tiny_pipeline(SkipLLMConfig(mode="off"), _Silent())
+    preds, timings = pipe.run()
+    assert all(t.top1_agree is None for _, t in timings)
+    _assert_valid_output(preds)
+
+
+def test_timing_csv_and_calibration_script_roundtrip():
+    from src.config import SkipLLMConfig
+    from src.io_utils import write_timing_debug_csv
+
+    pipe = _tiny_pipeline(SkipLLMConfig(mode="shadow", min_dense_gap=0.05, min_bm25_ratio=2.0),
+                          _CountingReverseReranker())
+    _, timings = pipe.run()
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "timing_debug.csv")
+        write_timing_debug_csv(path, timings)
+        with open(path, encoding="utf-8", newline="") as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 2
+        for col in ("skip_reason", "would_skip", "signals_agree", "dense_gap",
+                    "bm25_ratio", "tnved_exact", "top1_agree", "top3_overlap"):
+            assert col in rows[0], col
+        r = subprocess.run(
+            [sys.executable, os.path.join(PROJECT_ROOT, "scripts", "calibrate_skip.py"),
+             path, "--min-support", "1"],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert r.returncode == 0, r.stderr
+        assert "Деклараций с ответом LLM: 2" in r.stdout
+
+
+def test_cli_rejects_skip_on_without_thresholds():
+    r = subprocess.run(
+        [sys.executable, os.path.join(PROJECT_ROOT, "run.py"), "--out", tempfile.gettempdir() + "/x",
+         "--dry-run", "--skip-llm", "on"],
+        capture_output=True, text=True, cwd=PROJECT_ROOT, timeout=60,
+    )
+    assert r.returncode != 0
+    assert "--skip-min-dense-gap" in r.stderr
+
+
+def test_end_to_end_dry_run_shadow_mode_valid_output():
+    decls = load_declarations(DECLARATIONS_PATH)
+    regs = load_regulations(REGULATIONS_PATH)
+    with tempfile.TemporaryDirectory() as tmp_out:
+        r = subprocess.run(
+            [sys.executable, os.path.join(PROJECT_ROOT, "run.py"), "--out", tmp_out, "--dry-run",
+             "--skip-llm", "shadow", "--skip-min-dense-gap", "0.05", "--skip-min-bm25-ratio", "1.5",
+             "--log-level", "WARNING"],
+            capture_output=True, text=True, cwd=PROJECT_ROOT, timeout=120,
+        )
+        assert r.returncode == 0, r.stderr
+        validate_predictions_file(os.path.join(tmp_out, "predictions.csv"),
+                                  {d.declaration_id for d in decls},
+                                  {x.regulation_id for x in regs})
+
+
 if __name__ == "__main__":
     # Простой раннер без pytest: собирает все test_* функции модуля и
     # выполняет по очереди, печатая PASS/FAIL по каждой.

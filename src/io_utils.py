@@ -94,21 +94,47 @@ def write_predictions_csv(
 def write_timing_debug_csv(path: str, timings: List[Tuple[str, "StepTiming"]]) -> None:
     """
     Диагностический файл (НЕ часть обязательного формата задания) - по
-    строке на декларацию, с разбивкой времени по этапам. Открывается
-    pandas'ом в ноутбуке для построения реального распределения/гистограммы,
-    а не только сводки медиана/среднее из лога.
+    строке на декларацию: время по этапам + признаки уверенности retrieval
+    + (если LLM вызывалась) согласие её ответа с retrieval. Открывается
+    pandas'ом для построения распределений, и читается
+    scripts/calibrate_skip.py для подбора порогов пропуска LLM.
 
         import pandas as pd
         df = pd.read_csv('out/timing_debug.csv')
         df['llm_s'].hist(bins=30)
+
+    Пустая ячейка = значение неприменимо (например, top1_agree пуст, если LLM
+    для декларации не вызывалась).
     """
+
+    def fmt(v, digits=4):
+        if v is None:
+            return ""
+        if isinstance(v, bool):
+            return int(v)
+        if isinstance(v, float):
+            return f"{v:.{digits}f}"
+        return v
+
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["declaration_id", "anchor_s", "retrieval_s", "llm_s", "total_s", "used_llm"])
+        writer.writerow([
+            "declaration_id", "anchor_s", "retrieval_s", "llm_s", "total_s", "used_llm",
+            "skip_reason", "would_skip", "signals_agree", "dense_gap", "bm25_ratio",
+            "tnved_exact", "top1_agree", "top3_overlap",
+        ])
         for decl_id, t in timings:
-            writer.writerow([decl_id, f"{t.anchor_s:.4f}", f"{t.retrieval_s:.4f}",
-                              f"{t.llm_s:.4f}", f"{t.total_s:.4f}", int(t.used_llm)])
+            feat = t.features
+            writer.writerow([
+                decl_id, fmt(t.anchor_s), fmt(t.retrieval_s), fmt(t.llm_s), fmt(t.total_s),
+                int(t.used_llm), t.skip_reason, fmt(t.would_skip),
+                fmt(feat.signals_agree if feat else None),
+                fmt(feat.dense_gap if feat else None, 6),
+                fmt(feat.bm25_ratio if feat else None, 4),
+                fmt(feat.tnved_exact if feat else None),
+                fmt(t.top1_agree), fmt(t.top3_overlap),
+            ])
 
 
 class PredictionsWriter:

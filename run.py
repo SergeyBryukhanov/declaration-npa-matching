@@ -99,6 +99,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Включить подробный нативный лог llama.cpp на каждую генерацию "
              "(для отладки; по умолчанию выключено, т.к. забивает прогресс-бар)",
     )
+    ap.add_argument(
+        "--skip-llm",
+        choices=["off", "shadow", "on"],
+        default=config.skip_llm_cfg.mode,
+        help="Пропуск LLM для однозначных случаев: off - LLM на всех (по умолчанию); "
+             "shadow - LLM на всех + подсчёт, где пропуск был бы безопасен (данные для "
+             "калибровки, см. scripts/calibrate_skip.py); on - реальный пропуск "
+             "(требует --skip-min-dense-gap и --skip-min-bm25-ratio)",
+    )
+    ap.add_argument("--skip-min-dense-gap", type=float, default=config.skip_llm_cfg.min_dense_gap,
+                    help="Мин. отрыв косинусной близости лидера от 2-го места")
+    ap.add_argument("--skip-min-bm25-ratio", type=float, default=config.skip_llm_cfg.min_bm25_ratio,
+                    help="Мин. отношение BM25-скора лидера к 2-му месту")
+    ap.add_argument("--skip-require-tnved-exact", action="store_true",
+                    default=config.skip_llm_cfg.require_tnved_exact,
+                    help="Пропускать LLM только при точном substring-якоре ТН ВЭД")
     ap.add_argument("--no-embeddings", action="store_true", help="Отключить dense-сигнал, только BM25")
     ap.add_argument("--log-level", default="INFO")
     return ap
@@ -132,8 +148,26 @@ def build_llm_reranker(args) -> LLMReranker:
     )
 
 
+def build_skip_cfg(args) -> config.SkipLLMConfig:
+    skip_cfg = config.SkipLLMConfig(
+        mode=args.skip_llm,
+        min_dense_gap=args.skip_min_dense_gap,
+        min_bm25_ratio=args.skip_min_bm25_ratio,
+        require_tnved_exact=args.skip_require_tnved_exact,
+    )
+    skip_cfg.validate()
+    return skip_cfg
+
+
 def main():
-    args = build_arg_parser().parse_args()
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    try:
+        skip_cfg = build_skip_cfg(args)  # падаем ДО загрузки моделей, а не после 30 секунд инициализации
+    except ValueError as e:
+        parser.error(str(e))
+    if skip_cfg.mode == "on" and args.no_embeddings:
+        parser.error("--skip-llm on несовместим с --no-embeddings: правило уверенности требует dense-сигнала")
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -194,6 +228,7 @@ def main():
         llm_cfg=config.llm_cfg,
         time_budget_seconds=args.time_budget_min * 60,
         llm_cutoff_fraction=config.runtime_cfg.llm_cutoff_fraction,
+        skip_cfg=skip_cfg,
     )
 
     logger.info("Запуск пайплайна на %d декларациях...", len(declarations))
