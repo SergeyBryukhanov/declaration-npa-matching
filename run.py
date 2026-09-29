@@ -168,11 +168,23 @@ def main():
         parser.error(str(e))
     if skip_cfg.mode == "on" and args.no_embeddings:
         parser.error("--skip-llm on несовместим с --no-embeddings: правило уверенности требует dense-сигнала")
+
+    # Лог дублируется в файл (out/run.log), не только в консоль - раньше
+    # единственным способом получить лог было копировать вывод ячейки Colab
+    # вручную; для прогонов на 20-30 минут это неудобно и легко потерять
+    # хвост после закрытия/обновления вкладки браузера.
+    os.makedirs(args.out, exist_ok=True)
+    log_path = os.path.join(args.out, "run.log")
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_path, mode="w", encoding="utf-8"),
+        ],
     )
     logger = logging.getLogger("run")
+    logger.info("Лог этого запуска также сохраняется в %s", log_path)
     t_start = time.monotonic()
 
     # Фиксация seed для воспроизводимости. Основные компоненты пайплайна
@@ -252,6 +264,12 @@ def main():
         regulation_ids={r.regulation_id for r in regulations},
     )
     logger.info("Формат корректен.")
+
+    # Явно освобождаем модель ДО естественного завершения интерпретатора -
+    # см. QwenLlamaCppReranker.close() docstring. Предотвращает безвредный,
+    # но пугающий "TypeError: 'NoneType' object is not callable" в самом
+    # конце лога (Exception ignored in: <function Llama.__del__>).
+    llm_reranker.close()
 
     elapsed = time.monotonic() - t_start
     logger.info("Готово за %.1f сек (%.1f мин).", elapsed, elapsed / 60)

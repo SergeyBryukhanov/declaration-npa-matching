@@ -107,26 +107,13 @@ def build_user_prompt(
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
 
-def parse_llm_json(raw_output: str, valid_ids: set) -> List[Tuple[str, float]]:
-    """
-    Робастный парсинг ответа LLM. Возвращает [(regulation_id, score), ...],
-    отсортированный по убыванию score, только для валидных id.
-    При полном сбое парсинга возвращает [] (пайплайн должен фолбэкнуться
-    на retrieval-скор - см. pipeline.py).
-    """
-    match = _JSON_ARRAY_RE.search(raw_output)
-    if not match:
-        return []
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(data, list):
-        return []
+_JSON_OBJECT_RE = re.compile(r"\{[^{}]*\}")
 
+
+def _validate_items(items, valid_ids: set) -> List[Tuple[str, float]]:
     out = []
     seen = set()
-    for item in data:
+    for item in items:
         if not isinstance(item, dict):
             continue
         reg_id = item.get("id")
@@ -141,9 +128,40 @@ def parse_llm_json(raw_output: str, valid_ids: set) -> List[Tuple[str, float]]:
             continue
         seen.add(reg_id)
         out.append((reg_id, score))
-
-    out.sort(key=lambda x: -x[1])
+    out.sort(key=lambda x: -x[1])  # сортировка устойчивая: при равных score сохраняется порядок ответа
     return out
+
+
+def parse_llm_json(raw_output: str, valid_ids: set) -> List[Tuple[str, float]]:
+    """
+    Робастный парсинг ответа LLM. Возвращает [(regulation_id, score), ...],
+    отсортированный по убыванию score, только для валидных id.
+
+    Сначала пробуем разобрать ответ как целый JSON-массив. Если не вышло
+    (типичный случай - ответ ОБОРВАН лимитом max_new_tokens на длинной
+    декларации: нет закрывающей скобки), вытаскиваем из текста отдельные
+    ПОЛНЫЕ объекты {...} и валидируем каждый. Раньше в этом случае
+    выбрасывался весь ответ целиком, хотя большая часть оценок уже была
+    сгенерирована - воспроизводимо терялась одна и та же декларация
+    (длинное описание станка), см. историю правок в README.
+    При полном сбое возвращает [] (пайплайн фолбэкнется на retrieval-скор).
+    """
+    match = _JSON_ARRAY_RE.search(raw_output)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            if isinstance(data, list):
+                return _validate_items(data, valid_ids)
+        except json.JSONDecodeError:
+            pass  # пробуем вытащить отдельные объекты ниже
+
+    items = []
+    for chunk in _JSON_OBJECT_RE.findall(raw_output):
+        try:
+            items.append(json.loads(chunk))
+        except json.JSONDecodeError:
+            continue
+    return _validate_items(items, valid_ids)
 
 
 class LLMReranker(ABC):
@@ -159,6 +177,11 @@ class LLMReranker(ABC):
         Может вернуть МЕНЬШЕ элементов, чем len(candidates), если часть
         ответа модели не прошла валидацию - вызывающий код обязан
         досчитать недостающее (см. pipeline.fill_to_top_n)."""
+
+    def close(self) -> None:
+        """Освободить ресурсы модели. По умолчанию не требуется (StubReranker);
+        переопределён в QwenLlamaCppReranker. run.py вызывает это явно после
+        работы пайплайна - см. docstring QwenLlamaCppReranker.close для причины."""
 
 
 class QwenLlamaCppReranker(LLMReranker):
@@ -237,6 +260,26 @@ class QwenLlamaCppReranker(LLMReranker):
         self.max_new_tokens = max_new_tokens
         self.candidate_text_max_chars = candidate_text_max_chars
 
+    def close(self) -> None:
+        """Явно освободить модель ДО завершения интерпретатора.
+
+        Без этого вызова llama-cpp-python освобождает C-объект модели в
+        Llama.__del__, который срабатывает при сборке мусора - на практике
+        обычно уже во время финального завершения интерпретатора (после
+        того как main() отработал и Python выгружает модули). К этому
+        моменту некоторые ctypes-обёртки внутри llama_cpp уже обнулены
+        самим интерпретатором, и освобождение падает с
+        "TypeError: 'NoneType' object is not callable"
+        (Exception ignored in: <function Llama.__del__>) - безвредно для
+        результата (он уже записан и провалидирован к этому моменту), но
+        засоряет лог. Вызывая close() явно, пока интерпретатор полностью
+        жив, высвобождаем ресурсы штатно; повторный вызов из __del__ на
+        уже закрытом объекте - штатный no-op на стороне llama-cpp-python."""
+        try:
+            self.llm.close()
+        except Exception:
+            logger.debug("QwenLlamaCppReranker.close() дал сбой (не критично)", exc_info=True)
+
     def rerank(
         self,
         declaration_text: str,
@@ -259,15 +302,29 @@ class QwenLlamaCppReranker(LLMReranker):
                 temperature=self.temperature,
                 max_tokens=self.max_new_tokens,
             )
-            raw = completion["choices"][0]["message"]["content"]
+            choice = completion["choices"][0]
+            raw = choice["message"]["content"]
+            finish_reason = choice.get("finish_reason")
         except Exception:
             # Сбой генерации (например, переполнение контекста на длинном
             # промпте) - откатываемся на пустой результат, pipeline.py
-            # досчитает по retrieval-скору.
+            # досчитает по retrieval-скору. Но НЕ молча: раньше такие сбои
+            # были неотличимы от "модель ответила плохо".
+            logger.exception("Сбой генерации LLM, декларация будет ранжирована по retrieval")
             return []
 
         valid_ids = {c.regulation_id for c in candidates}
-        return parse_llm_json(raw, valid_ids)
+        result = parse_llm_json(raw, valid_ids)
+        if len(result) < len(candidates):
+            logger.warning(
+                "LLM вернула %d валидных оценок из %d кандидатов (finish_reason=%s%s). "
+                "Хвост ответа: %r",
+                len(result), len(candidates), finish_reason,
+                " - ответ ОБОРВАН лимитом max_new_tokens, стоит его поднять"
+                if finish_reason == "length" else "",
+                raw[-160:],
+            )
+        return result
 
 
 class StubReranker(LLMReranker):

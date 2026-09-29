@@ -147,6 +147,34 @@ def test_parse_llm_json_dedupes_keeping_first():
     assert out == [("A", 0.1)]
 
 
+def test_parse_llm_json_salvages_truncated_output():
+    """Ответ оборван лимитом токенов (нет закрывающей скобки): полные объекты
+    должны сохраниться, а не выбрасываться целиком."""
+    raw = '[{"id": "A", "score": 0.9}, {"id": "B", "score": 0.5}, {"id": "C", "sc'
+    assert parse_llm_json(raw, {"A", "B", "C"}) == [("A", 0.9), ("B", 0.5)]
+
+
+def test_parse_llm_json_salvage_still_validates_ids_and_dedupes():
+    raw = ('{"ranking": [{"id": "A", "score": 0.4}, {"id": "GHOST", "score": 0.99}, '
+           '{"id": "A", "score": 0.8}, {"id": "B", "score": "bad"}, {"id": "C", "score": 0.7}')
+    out = parse_llm_json(raw, {"A", "B", "C"})
+    assert out == [("C", 0.7), ("A", 0.4)]  # GHOST и нечисловой score отброшены, дубль A - первое вхождение
+
+
+def test_parse_llm_json_full_array_path_unchanged_when_valid():
+    raw = '[{"id":"B","score":0.2},{"id":"A","score":0.9}]'
+    assert parse_llm_json(raw, {"A", "B"}) == [("A", 0.9), ("B", 0.2)]
+
+
+def test_reranker_close_default_is_noop():
+    """LLMReranker.close() по умолчанию ничего не делает и не падает - важно,
+    т.к. run.py вызывает close() безусловно на любом реранкере, включая
+    StubReranker в --dry-run."""
+    from src.llm_rerank import StubReranker
+
+    StubReranker().close()  # не должно бросить исключение
+
+
 # --------------------------------------------------------------------------
 # fill_to_top_n - главный контракт корректности формата
 # --------------------------------------------------------------------------

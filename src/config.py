@@ -80,9 +80,11 @@ class LLMConfig:
     n_gpu_layers: int = -1     # -1 = выгрузить все возможные слои на GPU, если она есть
     n_threads: int = max(1, (os.cpu_count() or 4) - 1)
     temperature: float = 0.0   # детерминированность важнее "креативности"
-    max_new_tokens: int = 280  # промпт просит оценить ВСЕ кандидаты (сейчас
-    # их 10 - см. RetrievalConfig.npa_candidate_k), ~180-200 токенов JSON +
-    # запас.
+    max_new_tokens: int = 400  # промпт просит оценить ВСЕ кандидаты (сейчас
+    # их 10 - см. RetrievalConfig.npa_candidate_k): ~180-200 токенов JSON в
+    # типичном случае. 280 оказалось мало для длинных технических описаний
+    # (одна и та же декларация стабильно получала оборванный ответ). Лимит -
+    # потолок, а не цель: на времени обычных вызовов он не сказывается.
     candidate_text_max_chars: int = 380  # обрезка текста НПА в промпте
     verbose: bool = False  # см. src/llm_rerank.py::QwenLlamaCppReranker
 
