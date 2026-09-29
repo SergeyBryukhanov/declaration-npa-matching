@@ -1,0 +1,45 @@
+2026-09-29 04:02:03,334 [INFO] run: Лог этого запуска также сохраняется в ./out/run.log
+2026-09-29 04:02:03,334 [INFO] run: Загрузка данных...
+2026-09-29 04:02:03,341 [INFO] run: Деклараций: 151, регуляций: 562
+2026-09-29 04:02:03,341 [INFO] run: Построение индекса ТН ВЭД (/content/declaration-npa-matching/tnved_knowledge.txt)...
+2026-09-29 04:02:03,891 [INFO] pymorphy2.opencorpora_dict.wrapper: Loading dictionaries from /content/venv310/lib/python3.10/site-packages/pymorphy2_dicts_ru/data
+2026-09-29 04:02:03,965 [INFO] pymorphy2.opencorpora_dict.wrapper: format: 2.4, revision: 417127, updated: 2020-10-11T15:05:51.070345
+2026-09-29 04:02:06,521 [INFO] run: Листовых записей ТН ВЭД: 13145
+2026-09-29 04:02:06,521 [INFO] run: Инициализация эмбеддинг-бэкенда...
+2026-09-29 04:02:10,695 [INFO] sentence_transformers.SentenceTransformer: Use pytorch device_name: cuda
+2026-09-29 04:02:10,696 [INFO] sentence_transformers.SentenceTransformer: Load pretrained SentenceTransformer: /content/declaration-npa-matching/models/multilingual-e5-small
+2026-09-29 04:02:11,983 [INFO] run: Инициализация LLM-реранкера...
+2026-09-29 04:02:12,076 [INFO] llm_rerank: llama-cpp-python собран с поддержкой GPU-офлоада, запрошено n_gpu_layers=-1.
+2026-09-29 04:02:31,967 [INFO] pipeline: Building hybrid NPA index over 562 regulations...
+2026-09-29 04:02:35,076 [INFO] run: Запуск пайплайна на 151 декларациях...
+2026-09-29 04:04:33,639 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: 'PA0502", "score": 0.05}, {"id": "NPA0536", "score": 0.05}, {"id": "NPA0275", "score": 0.05}, {"id": "NPA0318", "score": 0.05}, {"id": "NPA0173", "score": 0.05}]'
+2026-09-29 04:05:16,856 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: 'PA0356", "score": 0.05}, {"id": "NPA0060", "score": 0.05}, {"id": "NPA0400", "score": 0.05}, {"id": "NPA0108", "score": 0.05}, {"id": "NPA0189", "score": 0.05}]'
+2026-09-29 04:05:38,492 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: '": "NPA0355", "score": 0.1}, {"id": "NPA0273", "score": 0.1}, {"id": "NPA0254", "score": 0.1}, {"id": "NPA0232", "score": 0.1}, {"id": "NPA0232", "score": 0.1}]'
+2026-09-29 04:06:00,138 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: 'A0312", "score": 0.25}, {"id": "NPA0102", "score": 0.05}, {"id": "NPA0250", "score": 0.05}, {"id": "NPA0456", "score": 0.05}, {"id": "NPA01661", "score": 0.05}]'
+2026-09-29 04:07:13,410 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: ' "NPA0404", "score": 0.5}, {"id": "NPA0551", "score": 0.45}, {"id": "NPA0538", "score": 0.4}, {"id": "NPA0501", "score": 0.35}, {"id": "NPA0246", "score": 0.3}]'
+2026-09-29 04:07:37,404 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: '"NPA0273", "score": 0.55}, {"id": "NPA0115", "score": 0.4}, {"id": "NPA0502", "score": 0.3}, {"id": "NPA0454", "score": 0.25}, {"id": "NPA0005", "score": 0.15}]'
+2026-09-29 04:09:45,971 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: 'PA0245", "score": 0.05}, {"id": "NPA0180", "score": 0.05}, {"id": "NPA0012", "score": 0.05}, {"id": "NPA0156", "score": 0.05}, {"id": "NPA0190", "score": 0.05}]'
+2026-09-29 04:10:06,427 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: 'PA0366", "score": 0.05}, {"id": "NPA0544", "score": 0.05}, {"id": "NPA0183", "score": 0.05}, {"id": "NPA0180", "score": 0.05}, {"id": "NPA0270", "score": 0.05}]'
+2026-09-29 04:10:39,213 [WARNING] llm_rerank: LLM вернула 0 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: ' "NPA0896", "score": 0.7}, {"id": "NPA0897", "score": 0.65}, {"id": "NPA0898", "score": 0.6}, {"id": "NPA0899", "score": 0.55}, {"id": "NPA0900", "score": 0.5}]'
+2026-09-29 04:10:50,232 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: '"NPA0398", "score": 0.1}, {"id": "NPA0220", "score": 0.05}, {"id": "NPA0429", "score": 0.1}, {"id": "NPA0356", "score": 0.05}, {"id": "NPA0297", "score": 0.05}]'
+2026-09-29 04:16:11,264 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: 'PA0024", "score": 0.05}, {"id": "NPA0065", "score": 0.05}, {"id": "NPA0053", "score": 0.05}, {"id": "NPA0349", "score": 0.05}, {"id": "NPA0005", "score": 0.05}]'
+2026-09-29 04:16:22,208 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: 'NPA0345", "score": 0.45}, {"id": "NPA0070", "score": 0.35}, {"id": "NPA0400", "score": 0.25}, {"id": "NPA0328", "score": 0.2}, {"id": "NPA0275", "score": 0.15}]'
+2026-09-29 04:18:21,589 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: 'A0156", "score": 0.05}, {"id": "NPA0375", "score": 0.05}, {"id": "NPA0115", "score": 0.05}, {"id": "NPA0312", "score": 0.05}, {"id": "NPA01661", "score": 0.05}]'
+2026-09-29 04:18:43,939 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: 'PA0497", "score": 0.05}, {"id": "NPA0551", "score": 0.05}, {"id": "NPA0478", "score": 0.05}, {"id": "NPA0555", "score": 0.05}, {"id": "NPA0159", "score": 0.05}]'
+2026-09-29 04:23:12,196 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: 'A0356", "score": 0.05}, {"id": "NPA0484", "score": 0.05}, {"id": "NPA0466", "score": 0.05}, {"id": "NPA0400", "score": 0.05}, {"id": "NPA01661", "score": 0.05}]'
+2026-09-29 04:23:23,180 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: 'PA0248", "score": 0.05}, {"id": "NPA0172", "score": 0.05}, {"id": "NPA0131", "score": 0.05}, {"id": "NPA0017", "score": 0.05}, {"id": "NPA0400", "score": 0.05}]'
+2026-09-29 04:24:27,176 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: ' "NPA0235", "score": 0.05}, {"id": "NPA0244", "score": 0.05}, {"id": "NPA0000", "score": 0.0}, {"id": "NPA0206", "score": 0.0}, {"id": "NPA0185", "score": 0.0}]'
+2026-09-29 04:27:29,498 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: 'PA0093", "score": 0.05}, {"id": "NPA0115", "score": 0.05}, {"id": "NPA0556", "score": 0.05}, {"id": "NPA0156", "score": 0.05}, {"id": "NPA0320", "score": 0.15}]'
+2026-09-29 04:29:13,883 [WARNING] llm_rerank: LLM вернула 9 валидных оценок из 10 кандидатов (finish_reason=stop). Хвост ответа: ' "NPA0011", "score": 0.1}, {"id": "NPA0173", "score": 0.1}, {"id": "NPA0345", "score": 0.1}, {"id": "NPA0007", "score": 0.05}, {"id": "NPA0173", "score": 0.05}]'
+2026-09-29 04:29:24,343 [INFO] pipeline: Профиль времени по этапам (retrieval почти всегда дёшев - основной потребитель времени виден явно, без гаданий):
+  ТН ВЭД якорение: медиана=0.03s, среднее=0.03s, мин=0.00s, макс=0.13s, n=151
+  Retrieval (BM25+dense): медиана=0.02s, среднее=0.02s, мин=0.01s, макс=0.04s, n=151
+  LLM-реранк (только там, где вызывался): медиана=10.57s, среднее=10.60s, мин=8.27s, макс=12.64s, n=151
+2026-09-29 04:29:24,343 [INFO] pipeline: Итог по декларациям: с LLM=151, пропущено как однозначные=0, без LLM из-за бюджета времени=0 (всего 151)
+2026-09-29 04:29:24,344 [INFO] pipeline: Согласие retrieval и LLM (данные для подбора порогов пропуска, см. scripts/calibrate_skip.py):
+  Все декларации с ответом LLM: n=150, лидер retrieval == лидер LLM в 40.7% случаев, пересечение топ-3 = 1.79/3
+2026-09-29 04:29:24,344 [INFO] run: Записано: ./out/predictions.csv
+2026-09-29 04:29:24,346 [INFO] run: Диагностика времени по этапам: ./out/timing_debug.csv
+2026-09-29 04:29:24,346 [INFO] run: Валидация формата вывода...
+2026-09-29 04:29:24,353 [INFO] run: Формат корректен.
+2026-09-29 04:29:24,435 [INFO] run: Готово за 1641.1 сек (27.4 мин).
